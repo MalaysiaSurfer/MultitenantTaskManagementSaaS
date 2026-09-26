@@ -1,12 +1,23 @@
 import asyncio
-
-from pydantic import PostgresDsn
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from pydantic import PostgresDsn
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with async_session() as session:
+        result = await session.execute(text("SELECT 1"))
+        print("DB connection ok:", result.scalar())
+    yield
+    await engine.dispose()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 class Settings(BaseSettings):
@@ -24,15 +35,11 @@ async_session = async_sessionmaker(engine, expire_on_commit=False)
 
 
 @app.get("/health")
-def healyh_check():
+def health_check():
     return {"status": "ok"}
 
 
 async def main():
     async with async_session() as session:
-        res = await session.execute("SELECT 1")
+        res = await session.execute(text("SELECT 1"))
         print("Успешное подключение! Результат:", res.scalar())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -11,15 +11,12 @@ httptools==0.8.0
 idna==3.20
 mako==1.4.3
 markupsafe==3.0.3
-mypy==1.18.1
-mypy-extensions==1.1.0
 pathspec==1.1.1
 pydantic==2.13.4
 pydantic-core==2.46.4
 pydantic-settings==2.15.0
 python-dotenv==1.2.2
 pyyaml==6.0.3
-ruff==0.16.9
 sqlalchemy==2.0.51
 starlette==1.7.0
 typing-extensions==4.16.0
