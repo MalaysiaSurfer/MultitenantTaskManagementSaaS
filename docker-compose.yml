@@ -2,7 +2,7 @@ services:
   api:
     build: 
       context: .
-      dockerfile: app/Dockerfile
+      dockerfile: Dockerfile
     volumes:
       - ./app:/app/app
       - ./alembic:/app/alembic
