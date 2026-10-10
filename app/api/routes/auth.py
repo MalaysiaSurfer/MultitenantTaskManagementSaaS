@@ -6,10 +6,10 @@ from fastapi.security import OAuth2PasswordRequestForm
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_active_user, get_current_user
+from app.api.deps import CurrentUser, get_active_user
 from app.core.config import settings
+from app.core.exceptions import EmailAlreadyRegistered
 from app.core.security import create_token, decode_token
-from app.db.base import User
 from app.db.session import get_db
 from app.schemas.auth import (
     OrgBrief,
@@ -19,7 +19,7 @@ from app.schemas.auth import (
     TokenPair,
     UserBrief,
 )
-from app.services.auth import EmailAlreadyRegistered, authenticate_user, register_user
+from app.services.auth import authenticate_user, register_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -82,9 +82,7 @@ async def login(
 
 
 @router.post("/refresh")
-async def refresh(
-    data: RefreshRequest, db: Annotated[AsyncSession, Depends(get_db)]
-) -> TokenPair:
+async def refresh(data: RefreshRequest, db: Annotated[AsyncSession, Depends(get_db)]) -> TokenPair:
     try:
         user_id = decode_token(data.refresh_token, "refresh")
     except InvalidTokenError:
@@ -119,6 +117,6 @@ async def refresh(
 
 @router.get("/me")
 async def me(
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> UserBrief:
     return UserBrief(id=user.id, email=user.email)

@@ -1,0 +1,2 @@
+INT4_MAX = 2147483647
+NOT_FOUND = "not found"

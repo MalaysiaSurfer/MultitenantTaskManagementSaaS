@@ -1,5 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.db.base import MembershipRole
+
 
 class UserBrief(BaseModel):
     id: int
@@ -14,7 +16,7 @@ class OrgBrief(BaseModel):
 class RegisterResponse(BaseModel):
     user: UserBrief
     organization: OrgBrief
-    role: str
+    role: MembershipRole
 
 
 class TokenPair(BaseModel):

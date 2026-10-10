@@ -4,13 +4,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import EmailAlreadyRegistered
 from app.core.security import DUMMY_HASH, password_hash, verify_password
 from app.db.base import Membership, MembershipRole, Organization, User
 from app.schemas.auth import RegisterRequest
-
-
-class EmailAlreadyRegistered(Exception):
-    pass
 
 
 async def register_user(
