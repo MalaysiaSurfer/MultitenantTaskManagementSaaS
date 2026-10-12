@@ -1,18 +1,11 @@
-from typing import NamedTuple
-
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundException, ProjectAlreadyExists
 from app.db.base import Project
-from app.schemas.project import CreateProjectRequest
-
-
-class OrganizationProject(NamedTuple):
-    id: int
-    organization_id: int
-    name: str
+from app.schemas.pagination import Page
+from app.schemas.project import CreateProjectRequest, OrganizationProject
 
 
 async def create_organization_project(
@@ -38,8 +31,10 @@ async def create_organization_project(
 async def get_organization_projects(
     db: AsyncSession,
     organization_id: int,
-) -> list[OrganizationProject]:
-    result = await db.execute(
+    limit: int = 20,
+    cursor: int | None = None,
+) -> Page:
+    stmt = (
         select(
             Project.id,
             Project.organization_id,
@@ -47,15 +42,24 @@ async def get_organization_projects(
         )
         .where(Project.organization_id == organization_id)
         .order_by(Project.id)
+        .limit(limit + 1)
     )
-    return [
+    if cursor is not None:
+        stmt = stmt.where(Project.id > cursor)
+    result = await db.execute(stmt)
+    rows = result.all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [
         OrganizationProject(
             id=row.id,
             organization_id=row.organization_id,
             name=row.name,
         )
-        for row in result
+        for row in rows
     ]
+
+    return Page(items=items, next_cursor=result[-1].id if has_more else None)
 
 
 async def get_organization_project(

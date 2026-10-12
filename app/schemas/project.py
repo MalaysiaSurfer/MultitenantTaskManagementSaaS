@@ -1,10 +1,25 @@
-from pydantic import BaseModel, Field
+from typing import NamedTuple
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class ProjectOut(BaseModel):
+class OrganizationProject(NamedTuple):
     id: int
     organization_id: int
     name: str
+
+
+class ProjectOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    organization_id: int
+    name: str
+
+
+class ProjectsPage(BaseModel):
+    items: list[ProjectOut]
+    next_cursor: int | None
 
 
 class CreateProjectRequest(BaseModel):

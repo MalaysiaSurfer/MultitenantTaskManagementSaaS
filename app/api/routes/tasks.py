@@ -1,11 +1,12 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import OrgMember, ResourceID
 from app.db.session import get_db
-from app.schemas.task import CreateTaskRequest, TaskOut
+from app.schemas.pagination import PaginationParams
+from app.schemas.task import CreateTaskRequest, TaskFilters, TaskOut, TasksPage
 from app.services.task import (
     create_project_task,
     get_organization_task,
@@ -38,24 +39,21 @@ async def create_task(
 async def get_tasks(
     membership: OrgMember,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[TaskOut]:
-    tasks = await get_organization_tasks(
+    pagination: Annotated[PaginationParams, Query()],
+    filters: Annotated[TaskFilters, Query()],
+) -> TasksPage:
+    page = await get_organization_tasks(
         db=db,
         organization_id=membership.organization_id,
+        status=filters.status,
+        assignee_id=filters.assignee_id,
+        project_id=filters.project_id,
+        unassigned=filters.unassigned,
+        limit=pagination.limit,
+        cursor=pagination.cursor,
     )
 
-    return [
-        TaskOut(
-            id=task.id,
-            organization_id=task.organization_id,
-            project_id=task.project_id,
-            title=task.title,
-            description=task.description,
-            status=task.status,
-            assignee_id=task.assignee_id,
-        )
-        for task in tasks
-    ]
+    return TasksPage(**page)
 
 
 @router.get("/{task_id}")

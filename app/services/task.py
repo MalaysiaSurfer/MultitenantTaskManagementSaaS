@@ -1,5 +1,4 @@
 import logging
-from typing import NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -7,19 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundException
 from app.db.base import Membership, Project, Task, TaskStatus
-from app.schemas.task import CreateTaskRequest
+from app.schemas.pagination import Page
+from app.schemas.task import CreateTaskRequest, OrganizationTask
 
 logger = logging.getLogger(__name__)
-
-
-class OrganizationTask(NamedTuple):
-    id: int
-    organization_id: int
-    project_id: int
-    title: str
-    description: str
-    status: TaskStatus
-    assignee_id: int | None
 
 
 async def create_project_task(
@@ -81,21 +71,39 @@ async def create_project_task(
 async def get_organization_tasks(
     db: AsyncSession,
     organization_id: int,
-) -> list[OrganizationTask]:
-    result = await db.execute(
-        select(
-            Task.id,
-            Task.organization_id,
-            Task.project_id,
-            Task.title,
-            Task.description,
-            Task.status,
-            Task.assignee_id,
-        )
-        .where(Task.organization_id == organization_id)
-        .order_by(Task.id)
-    )
-    return [
+    status: TaskStatus | None = None,
+    assignee_id: int | None = None,
+    project_id: int | None = None,
+    unassigned: bool = False,
+    limit: int = 20,
+    cursor: int | None = None,
+) -> Page:
+    stmt = select(
+        Task.id,
+        Task.organization_id,
+        Task.project_id,
+        Task.title,
+        Task.description,
+        Task.status,
+        Task.assignee_id,
+    ).where(Task.organization_id == organization_id)
+    if cursor is not None:
+        stmt = stmt.where(Task.id > cursor)
+    if status is not None:
+        stmt = stmt.where(Task.status == status)
+    if assignee_id is not None:
+        stmt = stmt.where(Task.assignee_id == assignee_id)
+    if project_id is not None:
+        stmt = stmt.where(Task.project_id == project_id)
+    if unassigned:
+        stmt = stmt.where(Task.assignee_id.is_(None))
+    stmt = stmt.order_by(Task.id)
+    stmt = stmt.limit(limit + 1)
+    result = await db.execute(stmt)
+    rows = result.all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [
         OrganizationTask(
             id=row.id,
             organization_id=row.organization_id,
@@ -105,8 +113,10 @@ async def get_organization_tasks(
             status=row.status,
             assignee_id=row.assignee_id,
         )
-        for row in result
+        for row in rows
     ]
+
+    return Page(items=items, next_cursor=result[-1].id if has_more else None)
 
 
 async def get_organization_task(

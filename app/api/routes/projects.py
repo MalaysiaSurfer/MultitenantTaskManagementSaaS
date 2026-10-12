@@ -1,12 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import OrgAdmin, OrgMember, OrgOwner, ResourceID
 from app.core.exceptions import ProjectAlreadyExists
 from app.db.session import get_db
-from app.schemas.project import CreateProjectRequest, ProjectOut
+from app.schemas.pagination import PaginationParams
+from app.schemas.project import CreateProjectRequest, ProjectOut, ProjectsPage
 from app.services.project import (
     create_organization_project,
     delete_organization_project,
@@ -37,20 +38,16 @@ async def create_project(
 async def get_projects(
     membership: OrgMember,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[ProjectOut]:
-    projects = await get_organization_projects(
+    pagination: Annotated[PaginationParams, Query()],
+) -> ProjectsPage:
+    page = await get_organization_projects(
         db=db,
         organization_id=membership.organization_id,
+        limit=pagination.limit,
+        cursor=pagination.cursor,
     )
 
-    return [
-        ProjectOut(
-            id=project.id,
-            organization_id=project.organization_id,
-            name=project.name,
-        )
-        for project in projects
-    ]
+    return ProjectsPage(**page)
 
 
 @router.get("/{project_id}")
