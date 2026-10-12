@@ -59,7 +59,7 @@ async def get_organization_projects(
         for row in rows
     ]
 
-    return Page(items=items, next_cursor=result[-1].id if has_more else None)
+    return Page(items=items, next_cursor=items[-1].id if has_more else None)
 
 
 async def get_organization_project(

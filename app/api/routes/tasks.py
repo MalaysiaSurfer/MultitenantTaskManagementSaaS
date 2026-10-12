@@ -53,7 +53,10 @@ async def get_tasks(
         cursor=pagination.cursor,
     )
 
-    return TasksPage(**page)
+    return TasksPage(
+        items=page.items,
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.get("/{task_id}")

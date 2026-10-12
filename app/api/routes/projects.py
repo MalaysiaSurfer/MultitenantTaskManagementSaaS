@@ -47,7 +47,10 @@ async def get_projects(
         cursor=pagination.cursor,
     )
 
-    return ProjectsPage(**page)
+    return ProjectsPage(
+        items=page.items,
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.get("/{project_id}")
