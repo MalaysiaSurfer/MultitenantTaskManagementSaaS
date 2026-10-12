@@ -34,18 +34,10 @@ class TasksPage(BaseModel):
 
 
 class TaskFilters(BaseModel):
-    model_config = {"extra": "forbid"}
-
     status: TaskStatus | None = Field(default=None)
     assignee_id: int | None = Field(default=None, ge=1, le=INT4_MAX)
     project_id: int | None = Field(default=None, ge=1, le=INT4_MAX)
     unassigned: bool = Field(default=False)
-
-    @model_validator(mode="after")
-    def check_assignee_filters(self):
-        if self.assignee_id is not None and self.unassigned:
-            raise ValueError("assignee_id and unassigned cannot be used together")
-        return self
 
 
 class CreateTaskRequest(BaseModel):

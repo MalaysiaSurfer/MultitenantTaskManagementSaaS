@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import OrgAdmin, OrgMember, OrgOwner, ResourceID
@@ -38,7 +38,7 @@ async def create_project(
 async def get_projects(
     membership: OrgMember,
     db: Annotated[AsyncSession, Depends(get_db)],
-    pagination: Annotated[PaginationParams, Query()],
+    pagination: Annotated[PaginationParams, Depends()],
 ) -> ProjectsPage:
     page = await get_organization_projects(
         db=db,

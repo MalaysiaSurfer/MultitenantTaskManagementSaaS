@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Path, status
+from fastapi import Depends, Header, HTTPException, Path, Query, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import INT4_MAX
 from app.core.exceptions import NotFoundException
 from app.core.security import decode_token
-from app.db.base import Membership, MembershipRole, User
+from app.db.base import Membership, MembershipRole, TaskStatus, User
 from app.db.session import get_db
+from app.schemas.pagination import PaginationParams
+from app.schemas.task import TaskFilters
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
@@ -85,6 +87,33 @@ async def get_current_membership(
         raise NotFoundException()
     return membership
 
+
+def get_pagination(
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[int | None, Query(ge=1, le=INT4_MAX)] = None,
+) -> PaginationParams:
+    return PaginationParams(limit=limit, cursor=cursor)
+
+
+def get_task_filters(
+    status_: Annotated[TaskStatus | None, Query(alias="status")] = None,
+    assignee_id: Annotated[int | None, Query(ge=1, le=INT4_MAX)] = None,
+    project_id: Annotated[int | None, Query(ge=1, le=INT4_MAX)] = None,
+    unassigned: bool = False,
+) -> TaskFilters:
+    if assignee_id is not None and unassigned:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="assignee_id and unassigned cannot be used together",
+        )
+    return TaskFilters(
+        status=status_, assignee_id=assignee_id, project_id=project_id, unassigned=unassigned
+    )
+
+
+Pagination = Annotated[PaginationParams, Depends(get_pagination)]
+
+TaskFiltersDep = Annotated[TaskFilters, Depends(get_task_filters)]
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 

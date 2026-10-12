@@ -1,12 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import OrgMember, ResourceID
+from app.api.deps import OrgMember, Pagination, ResourceID, TaskFiltersDep
 from app.db.session import get_db
-from app.schemas.pagination import PaginationParams
-from app.schemas.task import CreateTaskRequest, TaskFilters, TaskOut, TasksPage
+from app.schemas.task import CreateTaskRequest, TaskOut, TasksPage
 from app.services.task import (
     create_project_task,
     get_organization_task,
@@ -39,8 +38,8 @@ async def create_task(
 async def get_tasks(
     membership: OrgMember,
     db: Annotated[AsyncSession, Depends(get_db)],
-    pagination: Annotated[PaginationParams, Query()],
-    filters: Annotated[TaskFilters, Query()],
+    pagination: Pagination,
+    filters: TaskFiltersDep,
 ) -> TasksPage:
     page = await get_organization_tasks(
         db=db,
