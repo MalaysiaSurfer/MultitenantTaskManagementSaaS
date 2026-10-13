@@ -1,15 +1,26 @@
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundException
 from app.db.base import Membership, Project, Task, TaskStatus
 from app.schemas.pagination import Page
-from app.schemas.task import CreateTaskRequest, OrganizationTask
+from app.schemas.task import CreateTaskRequest, OrganizationTask, UpdateTaskRequest
 
 logger = logging.getLogger(__name__)
+
+
+async def _ensure_org_member(db: AsyncSession, organization_id: int, user_id: int) -> None:
+    result = await db.execute(
+        select(Membership.id).where(
+            Membership.user_id == user_id,
+            Membership.organization_id == organization_id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise NotFoundException()
 
 
 async def create_project_task(
@@ -27,15 +38,7 @@ async def create_project_task(
     if project_id is None:
         raise NotFoundException()
     if data.assignee_id is not None:
-        result = await db.execute(
-            select(Membership.id).where(
-                Membership.user_id == data.assignee_id,
-                Membership.organization_id == organization_id,
-            )
-        )
-        membership_id = result.scalar_one_or_none()
-        if membership_id is None:
-            raise NotFoundException()
+        await _ensure_org_member(db=db, organization_id=organization_id, user_id=data.assignee_id)
 
     task = Task(
         organization_id=organization_id,
@@ -148,3 +151,60 @@ async def get_organization_task(
         status=task.status,
         assignee_id=task.assignee_id,
     )
+
+
+async def update_organization_task(
+    db: AsyncSession,
+    organization_id: int,
+    data: UpdateTaskRequest,
+    task_id: int,
+) -> OrganizationTask:
+    update_data = data.model_dump(exclude_unset=True)
+    assignee_id = update_data.get("assignee_id")
+    if assignee_id is not None:
+        await _ensure_org_member(db=db, organization_id=organization_id, user_id=assignee_id)
+    result = await db.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.organization_id == organization_id)
+        .values(update_data)
+        .returning(
+            Task.id,
+            Task.organization_id,
+            Task.project_id,
+            Task.title,
+            Task.description,
+            Task.status,
+            Task.assignee_id,
+        )
+    )
+
+    task = result.one_or_none()
+    if task is None:
+        raise NotFoundException()
+
+    await db.commit()
+
+    return OrganizationTask(
+        id=task.id,
+        organization_id=task.organization_id,
+        project_id=task.project_id,
+        title=task.title,
+        description=task.description,
+        status=task.status,
+        assignee_id=task.assignee_id,
+    )
+
+
+async def delete_organization_task(
+    db: AsyncSession,
+    organization_id: int,
+    task_id: int,
+) -> None:
+    result = await db.execute(
+        delete(Task).where(Task.id == task_id, Task.organization_id == organization_id)
+    )
+
+    if result.rowcount == 0:
+        raise NotFoundException()
+
+    await db.commit()

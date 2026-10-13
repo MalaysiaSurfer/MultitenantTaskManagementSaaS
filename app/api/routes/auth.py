@@ -34,7 +34,7 @@ async def register(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email already registered",
-        )
+        ) from None
 
     return RegisterResponse(
         user=UserBrief(id=user.id, email=user.email),
@@ -90,7 +90,7 @@ async def refresh(data: RefreshRequest, db: Annotated[AsyncSession, Depends(get_
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid refresh token",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     user = await get_active_user(db, user_id)
 

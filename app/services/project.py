@@ -1,4 +1,4 @@
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,6 +82,31 @@ async def get_organization_project(
         id=project.id,
         organization_id=project.organization_id,
         name=project.name,
+    )
+
+
+async def update_organization_project(
+    db: AsyncSession, organization_id: int, data: CreateProjectRequest, project_id: int
+) -> OrganizationProject:
+    try:
+        result = await db.execute(
+            update(Project)
+            .where(Project.id == project_id, Project.organization_id == organization_id)
+            .values(name=data.name)
+            .returning(Project.id, Project.organization_id, Project.name)
+        )
+        row = result.one_or_none()
+        if row is None:
+            raise NotFoundException()
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ProjectAlreadyExists from None
+
+    return OrganizationProject(
+        id=row.id,
+        organization_id=row.organization_id,
+        name=row.name,
     )
 
 

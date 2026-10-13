@@ -50,6 +50,7 @@ ORG_NAME_MEMBER = f"Isolation Member Org {RUN_ID}"
 
 PROJECT_NAME_A = f"Project A {RUN_ID}"
 PROJECT_NAME_B = f"Project B {RUN_ID}"
+PROJECT_NAME_RENAMED = f"Project A Renamed {RUN_ID}"
 
 results: list[tuple[str, bool]] = []
 
@@ -104,7 +105,7 @@ def extract_id(data: Any) -> int | str | None:
 
 
 def extract_named_id(data: Any, name: str) -> int | str | None:
-    """Ищет ID организации по её имени."""
+    """Ищет ID сущности по её имени."""
 
     if isinstance(data, list):
         for item in data:
@@ -142,6 +143,28 @@ def contains_task(data: Any, title: str) -> bool:
         )
 
     return False
+
+
+def find_task(data: Any, title: str) -> dict[str, Any] | None:
+    """Возвращает объект задачи с указанным названием из JSON-ответа."""
+
+    if isinstance(data, list):
+        for item in data:
+            result = find_task(item, title)
+            if result is not None:
+                return result
+
+    elif isinstance(data, dict):
+        if data.get("title") == title:
+            return data
+
+        for value in data.values():
+            if isinstance(value, (dict, list)):
+                result = find_task(value, title)
+                if result is not None:
+                    return result
+
+    return None
 
 
 async def register(
@@ -534,7 +557,58 @@ async def main() -> int:
                 response=projects_a_response,
             )
 
-            # 4. Создание задач.
+            # 4. Переименование проекта и проверка уникальности имени.
+
+            response = await client.patch(
+                f"/projects/{project_a_id}",
+                headers=headers_a,
+                json={"name": PROJECT_NAME_RENAMED},
+            )
+            rename_project_succeeded = check(
+                "PATCH project A with a new name -> 200",
+                response.status_code == 200,
+                response=response,
+            )
+
+            if rename_project_succeeded:
+                response = await client.get(f"/projects/{project_a_id}", headers=headers_a)
+                data = json_body(response)
+                check(
+                    "GET project A after rename returns the new name",
+                    (
+                        response.status_code == 200
+                        and isinstance(data, dict)
+                        and data.get("name") == PROJECT_NAME_RENAMED
+                    ),
+                    response=response,
+                )
+            else:
+                check(
+                    "GET project A after rename returns the new name",
+                    False,
+                    details="Skipped because project rename did not return 200",
+                )
+
+            other_name = f"Rename Target {RUN_ID}"
+            other_project_response = await create_project(client, token_a, org_a_id, other_name)
+
+            if check(
+                "Create second project for rename-conflict check",
+                other_project_response.status_code == 201,
+                response=other_project_response,
+            ):
+                response = await client.patch(
+                    f"/projects/{project_a_id}",
+                    headers=headers_a,
+                    json={"name": other_name},
+                )
+                check(
+                    "PATCH project to existing name in same organization -> 409",
+                    response.status_code == 409,
+                    response=response,
+                )
+
+            # 5. Создание задач.
 
             task_a_title = f"Task A {RUN_ID}"
             task_b_title = f"Task B {RUN_ID}"
@@ -579,7 +653,7 @@ async def main() -> int:
             if task_b_id is None:
                 raise RuntimeError("Could not extract task B ID")
 
-            # 5. Позитивная проверка поиска задач.
+            # 6. Позитивная проверка поиска задач.
 
             tasks_response = await list_tasks(
                 client,
@@ -634,7 +708,123 @@ async def main() -> int:
                 response=tasks_b_response,
             )
 
-            # 6. Изоляция чтения.
+            # 7. Проверка PATCH-валидации задачи.
+
+            for payload, label in (
+                ({}, "empty body"),
+                ({"title": None}, "title=null"),
+                ({"project_id": 1}, "project_id is not updatable"),
+            ):
+                response = await client.patch(
+                    f"/tasks/{task_a_id}",
+                    headers=headers_a,
+                    json=payload,
+                )
+                check(
+                    f"PATCH task with {label} -> 422",
+                    response.status_code == 422,
+                    response=response,
+                )
+
+            # 8. PATCH с исполнителем из другой организации должен отклоняться
+            # и не должен менять задачу.
+
+            task_before_cross_assignee = await client.get(
+                f"/tasks/{task_a_id}",
+                headers=headers_a,
+            )
+            before_data = json_body(task_before_cross_assignee)
+
+            response = await client.patch(
+                f"/tasks/{task_a_id}",
+                headers=headers_a,
+                json={"assignee_id": user_b_id},
+            )
+            check(
+                "PATCH task with cross-org assignee -> 404",
+                response.status_code == 404,
+                response=response,
+            )
+
+            task_after_cross_assignee = await client.get(
+                f"/tasks/{task_a_id}",
+                headers=headers_a,
+            )
+            after_data = json_body(task_after_cross_assignee)
+
+            check(
+                "Rejected cross-org assignee PATCH leaves task unchanged",
+                (
+                    task_before_cross_assignee.status_code == 200
+                    and task_after_cross_assignee.status_code == 200
+                    and before_data == after_data
+                ),
+                response=task_after_cross_assignee,
+                details=(
+                    f"Before: {before_data}; after: {after_data}"
+                    if before_data != after_data
+                    else ""
+                ),
+            )
+
+            # 9. PATCH с assignee_id=null снимает исполнителя.
+            # Сначала назначаем участника той же организации.
+
+            response = await client.patch(
+                f"/tasks/{task_a_id}",
+                headers=headers_a,
+                json={"assignee_id": member_id},
+            )
+            assigned_member = check(
+                "PATCH task to assign an in-org member -> 200",
+                response.status_code == 200
+                and isinstance(json_body(response), dict)
+                and json_body(response).get("assignee_id") == member_id,
+                response=response,
+            )
+
+            if assigned_member:
+                response = await client.patch(
+                    f"/tasks/{task_a_id}",
+                    headers=headers_a,
+                    json={"assignee_id": None},
+                )
+                check(
+                    "PATCH task with assignee_id=null -> 200 and assignee cleared",
+                    (
+                        response.status_code == 200
+                        and isinstance(json_body(response), dict)
+                        and json_body(response).get("assignee_id") is None
+                    ),
+                    response=response,
+                )
+
+                response = await client.get(
+                    f"/tasks/{task_a_id}",
+                    headers=headers_a,
+                )
+                check(
+                    "GET task confirms assignee_id is null",
+                    (
+                        response.status_code == 200
+                        and isinstance(json_body(response), dict)
+                        and json_body(response).get("assignee_id") is None
+                    ),
+                    response=response,
+                )
+            else:
+                check(
+                    "PATCH task with assignee_id=null -> 200 and assignee cleared",
+                    False,
+                    details="Skipped because assigning an in-org member failed",
+                )
+                check(
+                    "GET task confirms assignee_id is null",
+                    False,
+                    details="Skipped because assigning an in-org member failed",
+                )
+
+            # 10. Изоляция чтения.
 
             response = await client.get(
                 f"/projects/{project_b_id}",
@@ -676,7 +866,7 @@ async def main() -> int:
                 ),
             )
 
-            # 7. Попытка создать задачу в чужом проекте.
+            # 11. Попытка создать задачу в чужом проекте.
 
             cross_title = f"Must not exist {RUN_ID}"
 
@@ -717,7 +907,7 @@ async def main() -> int:
                     details="Cross-org POST did not return 404",
                 )
 
-            # 8. Попытка назначить исполнителя из другой организации.
+            # 12. Попытка назначить исполнителя из другой организации при создании.
 
             cross_assignee_title = f"Invalid assignee {RUN_ID}"
 
@@ -760,21 +950,21 @@ async def main() -> int:
                     details="Cross-assignee POST did not return 404",
                 )
 
-            # 9. Дубликат имени проекта.
+                # 13. Дубликат имени проекта при создании.
 
-            response = await create_project(
-                client,
-                token_a,
-                org_a_id,
-                PROJECT_NAME_A,
-            )
-            check(
-                "Duplicate project name -> 409",
-                response.status_code == 409,
-                response=response,
-            )
+                response = await create_project(
+                    client,
+                    token_a,
+                    org_a_id,
+                    PROJECT_NAME_RENAMED,
+                )
+                check(
+                    "Duplicate project name -> 409",
+                    response.status_code == 409,
+                    response=response,
+                )
 
-            # 10. Проверка запретов ролей.
+            # 14. Проверка запретов ролей.
 
             response = await create_project(
                 client,
@@ -798,8 +988,7 @@ async def main() -> int:
                 response=response,
             )
 
-            # 11. Проверка X-Organization-ID.
-            # Один HTTP-запрос используется в двух проверках.
+            # 15. Проверка X-Organization-ID.
 
             foreign_org_response = await client.get(
                 "/projects",
@@ -853,7 +1042,7 @@ async def main() -> int:
                 response=response,
             )
 
-            # 12. Проверка составного внешнего ключа в БД.
+            # 16. Проверка составного внешнего ключа в БД.
 
             composite_fk_passed, composite_fk_details = await check_composite_fk(
                 invalid_organization_id=int(org_a_id),
@@ -869,7 +1058,7 @@ async def main() -> int:
                 details=composite_fk_details,
             )
 
-            # 13. Удаление чужого проекта запрещено.
+            # 17. Удаление чужого проекта запрещено.
 
             response = await client.delete(
                 f"/projects/{project_b_id}",
@@ -893,7 +1082,32 @@ async def main() -> int:
                 response=project_b_after_delete,
             )
 
-            # 14. Удаление проекта и проверка каскада.
+            # 18. Удаление чужой задачи запрещено.
+
+            response = await client.delete(
+                f"/tasks/{task_b_id}",
+                headers=headers_a,
+            )
+            check(
+                "OWNER A DELETE task B -> 404",
+                response.status_code == 404,
+                response=response,
+            )
+
+            task_b_after_delete = await client.get(
+                f"/tasks/{task_b_id}",
+                headers=headers_b,
+            )
+            check(
+                "Task B still exists after cross-org DELETE attempt",
+                (
+                    task_b_after_delete.status_code == 200
+                    and contains_task(json_body(task_b_after_delete), task_b_title)
+                ),
+                response=task_b_after_delete,
+            )
+
+            # 19. Удаление проекта и проверка каскада.
 
             response = await client.delete(
                 f"/projects/{project_a_id}",
@@ -930,15 +1144,15 @@ async def main() -> int:
                 check(
                     "Deleted project GET -> 404",
                     False,
-                    details=("Skipped because owner deletion did not return 204"),
+                    details="Skipped because owner deletion did not return 204",
                 )
                 check(
                     "Task removed by ON DELETE CASCADE -> 404",
                     False,
-                    details=("Skipped because owner deletion did not return 204"),
+                    details="Skipped because owner deletion did not return 204",
                 )
 
-            # 15. Проверка границ ResourceID.
+            # 20. Проверка границ ResourceID.
 
             response = await client.get(
                 "/tasks/99999999999",
@@ -950,7 +1164,7 @@ async def main() -> int:
                 response=response,
             )
 
-            # 16. GET /projects без токена.
+            # 21. GET /projects без токена.
 
             response = await client.get("/projects")
             check(
@@ -959,7 +1173,7 @@ async def main() -> int:
                 response=response,
             )
 
-            # 17. Удаление membership немедленно отзывает доступ.
+            # 22. Удаление membership немедленно отзывает доступ.
 
             await remove_membership(user_b_id, org_b_id)
 
