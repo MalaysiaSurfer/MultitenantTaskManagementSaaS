@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api.routes import auth, health, organization, projects, tasks
+from app.api.routes import auth, health, invitations, organization, projects, tasks
 from app.core.constants import NOT_FOUND
 from app.core.exceptions import NotFoundException
 from app.db.session import async_session, engine
@@ -45,3 +45,4 @@ app.include_router(auth.router)
 app.include_router(organization.router)
 app.include_router(projects.router)
 app.include_router(tasks.router)
+app.include_router(invitations.router)

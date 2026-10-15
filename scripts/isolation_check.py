@@ -1,7 +1,11 @@
 import asyncio
+import hashlib
 import os
+import re
+import subprocess
 import sys
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +15,7 @@ sys.path.insert(0, str(ROOT_DIR))
 import httpx
 from app.core.config import settings
 from app.core.constants import INT4_MAX
-from app.db.base import Membership, MembershipRole, Task
+from app.db.base import Invitation, Membership, MembershipRole, Task, User
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
@@ -42,6 +46,10 @@ EMAIL_A = f"isolation-a-{RUN_ID}@example.com"
 EMAIL_B = f"isolation-b-{RUN_ID}@example.com"
 EMAIL_ADMIN = f"isolation-admin-{RUN_ID}@example.com"
 EMAIL_MEMBER = f"isolation-member-{RUN_ID}@example.com"
+EMAIL_INVITATION_RECIPIENT = f"invitation-recipient-{RUN_ID}@example.com"
+EMAIL_INVITATION_OTHER = f"invitation-other-{RUN_ID}@example.com"
+EMAIL_INVITATION_EXPIRED = f"invitation-expired-{RUN_ID}@example.com"
+EMAIL_INVITATION_UNKNOWN = f"invitation-unknown-{RUN_ID}@example.com"
 
 ORG_NAME_A = f"Isolation Org A {RUN_ID}"
 ORG_NAME_B = f"Isolation Org B {RUN_ID}"
@@ -263,6 +271,94 @@ def org_headers(
     }
 
 
+async def send_invitation(
+    client: httpx.AsyncClient,
+    inviter_token: str,
+    organization_id: int | str,
+    email: str,
+    role: str,
+) -> httpx.Response:
+    """Отправляет приглашение через API; генерация токена происходит в API-процессе."""
+
+    return await client.post(
+        "/organizations/invite",
+        headers=org_headers(inviter_token, organization_id),
+        json={"email": email, "role": role},
+    )
+
+
+def get_logged_invitation_token(
+    email: str,
+    organization_id: int | str,
+) -> str | None:
+    """Извлекает токен из лога API, поскольку токен генерируется другим процессом."""
+
+    try:
+        completed = subprocess.run(
+            ["docker", "compose", "logs", "--since", "10m", "--no-color", "api"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            cwd=ROOT_DIR,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    logs = f"{completed.stdout}\n{completed.stderr}"
+    pattern = re.compile(
+        rf"Invitation for {re.escape(email)} to organization "
+        rf"{re.escape(str(organization_id))}, token=([^\s]+)"
+    )
+    matches = pattern.findall(logs)
+    return matches[-1] if matches else None
+
+
+async def get_invitation(
+    organization_id: int | str,
+    email: str,
+) -> Invitation | None:
+    """Возвращает ожидающее приглашение по организации и email."""
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Invitation).where(
+                Invitation.organization_id == organization_id,
+                Invitation.email == email,
+                Invitation.accepted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
+
+async def expire_invitation(
+    organization_id: int | str,
+    email: str,
+) -> bool:
+    """Просрочивает ожидающее приглашение непосредственно в БД."""
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Invitation).where(
+                Invitation.organization_id == organization_id,
+                Invitation.email == email,
+                Invitation.accepted_at.is_(None),
+            )
+        )
+        invitation = result.scalar_one_or_none()
+        if invitation is None:
+            return False
+
+        invitation.expires_at = datetime.now(UTC) - timedelta(days=1)
+        await session.commit()
+        return True
+
+
+async def get_user_id_by_email(email: str) -> int | None:
+    async with async_session() as session:
+        return await session.scalar(select(User.id).where(User.email == email))
+
+
 async def create_project(
     client: httpx.AsyncClient,
     token: str,
@@ -433,11 +529,29 @@ async def main() -> int:
                 EMAIL_MEMBER,
                 ORG_NAME_MEMBER,
             )
+            await register(
+                client,
+                EMAIL_INVITATION_RECIPIENT,
+                f"Invitation Recipient Org {RUN_ID}",
+            )
+            await register(
+                client,
+                EMAIL_INVITATION_OTHER,
+                f"Invitation Other Org {RUN_ID}",
+            )
+            await register(
+                client,
+                EMAIL_INVITATION_EXPIRED,
+                f"Invitation Expired Org {RUN_ID}",
+            )
 
             token_a = await login(client, EMAIL_A)
             token_b = await login(client, EMAIL_B)
             token_admin = await login(client, EMAIL_ADMIN)
             token_member = await login(client, EMAIL_MEMBER)
+            token_invitation_recipient = await login(client, EMAIL_INVITATION_RECIPIENT)
+            token_invitation_other = await login(client, EMAIL_INVITATION_OTHER)
+            token_invitation_expired = await login(client, EMAIL_INVITATION_EXPIRED)
 
             org_a_id = await get_organization_id(
                 client,
@@ -465,6 +579,298 @@ async def main() -> int:
             headers_b = org_headers(token_b, org_b_id)
             headers_admin = org_headers(token_admin, org_a_id)
             headers_member = org_headers(token_member, org_a_id)
+
+            # 1.1. Проверка прав и жизненного цикла приглашений.
+
+            # ADMIN может приглашать MEMBER.
+            response = await send_invitation(
+                client,
+                token_admin,
+                org_a_id,
+                EMAIL_INVITATION_RECIPIENT,
+                "member",
+            )
+            check(
+                "ADMIN invites MEMBER -> 202",
+                response.status_code == 202,
+                response=response,
+            )
+
+            # ADMIN не может приглашать ADMIN.
+            response = await send_invitation(
+                client,
+                token_admin,
+                org_a_id,
+                EMAIL_INVITATION_OTHER,
+                "admin",
+            )
+            check(
+                "ADMIN invites ADMIN -> 403",
+                response.status_code == 403,
+                response=response,
+            )
+
+            # OWNER может приглашать ADMIN.
+            response = await send_invitation(
+                client,
+                token_a,
+                org_a_id,
+                EMAIL_INVITATION_OTHER,
+                "admin",
+            )
+            check(
+                "OWNER invites ADMIN -> 202",
+                response.status_code == 202,
+                response=response,
+            )
+            invitation_other_token = get_logged_invitation_token(
+                EMAIL_INVITATION_OTHER,
+                org_a_id,
+            )
+            check(
+                "Read admin invitation token from API log",
+                invitation_other_token is not None,
+            )
+            if invitation_other_token is None:
+                raise RuntimeError("Could not read admin invitation token from API logs")
+
+            # role=owner запрещён схемой запроса.
+            response = await client.post(
+                "/organizations/invite",
+                headers=headers_a,
+                json={
+                    "email": f"invitation-owner-{RUN_ID}@example.com",
+                    "role": "owner",
+                },
+            )
+            check(
+                "role=owner -> 422",
+                response.status_code == 422,
+                response=response,
+            )
+
+            # MEMBER не может приглашать пользователей.
+            response = await client.post(
+                "/organizations/invite",
+                headers=headers_member,
+                json={
+                    "email": f"invitation-forbidden-{RUN_ID}@example.com",
+                    "role": "member",
+                },
+            )
+            check(
+                "MEMBER invites MEMBER -> 403",
+                response.status_code == 403,
+                response=response,
+            )
+
+            # Ответы для существующего пользователя, неизвестного email и
+            # уже состоящего в организации участника не раскрывают состояние.
+            privacy_cases = (
+                (EMAIL_INVITATION_RECIPIENT, "existing user not in organization"),
+                (EMAIL_INVITATION_UNKNOWN, "unknown email"),
+                (EMAIL_MEMBER, "existing organization member"),
+            )
+            privacy_responses: list[tuple[str, httpx.Response]] = []
+            for index, (email, label) in enumerate(privacy_cases):
+                response = await send_invitation(
+                    client,
+                    token_a,
+                    org_a_id,
+                    email,
+                    "member",
+                )
+                privacy_responses.append((label, response))
+                check(
+                    f"Invitation privacy response: {label} -> 202",
+                    response.status_code == 202,
+                    response=response,
+                )
+
+            reference_status = privacy_responses[0][1].status_code
+            reference_body = json_body(privacy_responses[0][1])
+            check(
+                "Invitation responses do not reveal whether email exists or is already a member",
+                all(
+                    response.status_code == reference_status
+                    and json_body(response) == reference_body
+                    for _, response in privacy_responses
+                ),
+                response=privacy_responses[0][1],
+                details="Compared status and JSON body for all three email cases.",
+            )
+
+            # Повторно создаём приглашение с известным токеном после privacy-теста,
+            # который мог обновить хэш ожидающего приглашения.
+            response = await send_invitation(
+                client,
+                token_a,
+                org_a_id,
+                EMAIL_INVITATION_RECIPIENT,
+                "member",
+            )
+            check(
+                "Create invitation for acceptance tests -> 202",
+                response.status_code == 202,
+                response=response,
+            )
+            invitation_recipient_token = get_logged_invitation_token(
+                EMAIL_INVITATION_RECIPIENT,
+                org_a_id,
+            )
+            check(
+                "Read recipient invitation token from API log",
+                invitation_recipient_token is not None,
+                details=(
+                    "Ensure API INFO logs include the invitation log entry and "
+                    "docker compose logs can access the api service."
+                ) if invitation_recipient_token is None else "",
+            )
+            if invitation_recipient_token is None:
+                raise RuntimeError("Could not read recipient invitation token from API logs")
+
+            stored_invitation = await get_invitation(
+                org_a_id,
+                EMAIL_INVITATION_RECIPIENT,
+            )
+            check(
+                "Invitation stores only the token hash",
+                stored_invitation is not None
+                and stored_invitation.token_hash
+                == hashlib.sha256(
+                    invitation_recipient_token.encode("utf-8")
+                ).hexdigest(),
+            )
+
+            # Пользователь организации B получает 404 на токен приглашения в A;
+            # приглашение остаётся активным для настоящего получателя.
+            response = await client.post(
+                "/invitations/accept",
+                headers={"Authorization": f"Bearer {token_b}"},
+                json={"token": invitation_recipient_token},
+            )
+            check(
+                "User B cannot accept invitation addressed to another email -> 404",
+                response.status_code == 404,
+                response=response,
+            )
+
+            pending_after_wrong_user = await get_invitation(
+                org_a_id,
+                EMAIL_INVITATION_RECIPIENT,
+            )
+            check(
+                "Wrong-user attempt leaves invitation pending",
+                pending_after_wrong_user is not None
+                and pending_after_wrong_user.accepted_at is None,
+            )
+
+            # Настоящий получатель принимает приглашение.
+            response = await client.post(
+                "/invitations/accept",
+                headers={"Authorization": f"Bearer {token_invitation_recipient}"},
+                json={"token": invitation_recipient_token},
+            )
+            accepted_data = json_body(response)
+            check(
+                "Correct user accepts invitation -> 200",
+                response.status_code == 200,
+                response=response,
+            )
+            check(
+                "Accepted invitation returns organization A and MEMBER role",
+                isinstance(accepted_data, dict)
+                and str(accepted_data.get("organization_id")) == str(org_a_id)
+                and accepted_data.get("role") == "member",
+                response=response,
+            )
+
+            recipient_orgs_response = await client.get(
+                "/organizations",
+                headers={"Authorization": f"Bearer {token_invitation_recipient}"},
+            )
+            check(
+                "Accepted organization appears in GET /organizations",
+                recipient_orgs_response.status_code == 200
+                and extract_named_id(
+                    json_body(recipient_orgs_response),
+                    ORG_NAME_A,
+                ) is not None,
+                response=recipient_orgs_response,
+            )
+
+            # Повторное принятие одноразового токена запрещено.
+            response = await client.post(
+                "/invitations/accept",
+                headers={"Authorization": f"Bearer {token_invitation_recipient}"},
+                json={"token": invitation_recipient_token},
+            )
+            check(
+                "Reusing accepted invitation token -> 404",
+                response.status_code == 404,
+                response=response,
+            )
+
+            # Приглашение A с email другого пользователя не может добавить его в B.
+            response = await client.post(
+                "/invitations/accept",
+                headers={"Authorization": f"Bearer {token_invitation_other}"},
+                json={"token": invitation_other_token},
+            )
+            cross_org_accept_data = json_body(response)
+            check(
+                "Token issued for organization A accepts only into A -> 200",
+                response.status_code == 200
+                and isinstance(cross_org_accept_data, dict)
+                and str(cross_org_accept_data.get("organization_id")) == str(org_a_id),
+                response=response,
+            )
+            other_orgs_response = await client.get(
+                "/organizations",
+                headers={"Authorization": f"Bearer {token_invitation_other}"},
+            )
+            check(
+                "Invitation token for A does not add user to organization B",
+                other_orgs_response.status_code == 200
+                and extract_named_id(json_body(other_orgs_response), ORG_NAME_B) is None,
+                response=other_orgs_response,
+            )
+
+            # Просроченный токен должен возвращать 404.
+            response = await send_invitation(
+                client,
+                token_a,
+                org_a_id,
+                EMAIL_INVITATION_EXPIRED,
+                "member",
+            )
+            check(
+                "Create invitation for expiration test -> 202",
+                response.status_code == 202,
+                response=response,
+            )
+            invitation_expired_token = get_logged_invitation_token(
+                EMAIL_INVITATION_EXPIRED,
+                org_a_id,
+            )
+            check(
+                "Read expiration-test token from API log",
+                invitation_expired_token is not None,
+            )
+            if invitation_expired_token is None:
+                raise RuntimeError("Could not read expiration-test token from API logs")
+            expired_in_db = await expire_invitation(org_a_id, EMAIL_INVITATION_EXPIRED)
+            check("Expiration test invitation exists in DB", expired_in_db)
+            response = await client.post(
+                "/invitations/accept",
+                headers={"Authorization": f"Bearer {token_invitation_expired}"},
+                json={"token": invitation_expired_token},
+            )
+            check(
+                "Accept expired invitation -> 404",
+                response.status_code == 404,
+                response=response,
+            )
 
             # 2. Создание проектов.
 
@@ -652,6 +1058,41 @@ async def main() -> int:
 
             if task_b_id is None:
                 raise RuntimeError("Could not extract task B ID")
+
+            # MEMBER не может создавать, изменять или удалять задачи.
+            response = await create_task(
+                client,
+                token_member,
+                org_a_id,
+                project_a_id,
+                f"Member forbidden task {RUN_ID}",
+            )
+            check(
+                "MEMBER POST /tasks -> 403",
+                response.status_code == 403,
+                response=response,
+            )
+
+            response = await client.patch(
+                f"/tasks/{task_a_id}",
+                headers=headers_member,
+                json={"title": f"Member forbidden update {RUN_ID}"},
+            )
+            check(
+                "MEMBER PATCH /tasks/{id} -> 403",
+                response.status_code == 403,
+                response=response,
+            )
+
+            response = await client.delete(
+                f"/tasks/{task_a_id}",
+                headers=headers_member,
+            )
+            check(
+                "MEMBER DELETE /tasks/{id} -> 403",
+                response.status_code == 403,
+                response=response,
+            )
 
             # 6. Позитивная проверка поиска задач.
 

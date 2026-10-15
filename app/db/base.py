@@ -7,9 +7,11 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -23,13 +25,18 @@ class Base(DeclarativeBase):
     pass
 
 
-class MembershipRole(str, enum.Enum):
+class MembershipRole(enum.StrEnum):
     OWNER = "owner"
     ADMIN = "admin"
     MEMBER = "member"
 
 
-class TaskStatus(str, enum.Enum):
+class InvitationRole(enum.StrEnum):
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+class TaskStatus(enum.StrEnum):
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     DONE = "done"
@@ -126,3 +133,36 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     project: Mapped["Project"] = relationship(back_populates="tasks")
     assignee: Mapped["User | None"] = relationship(back_populates="assigned_tasks")
+
+
+class Invitation(Base):
+    __tablename__ = "invitations"
+    __table_args__ = (
+        Index(
+            "uq_invitations_pending_org_email",
+            "organization_id",
+            "email",
+            unique=True,
+            postgresql_where=text("accepted_at IS NULL"),
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[InvitationRole] = mapped_column(
+        Enum(
+            InvitationRole,
+            name="invitation_role",
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        default=InvitationRole.MEMBER,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invited_by_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

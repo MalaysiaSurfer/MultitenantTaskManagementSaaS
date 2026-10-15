@@ -8,3 +8,7 @@ class EmailAlreadyRegistered(Exception):
 
 class ProjectAlreadyExists(Exception):
     pass
+
+
+class AlreadyMember(Exception):
+    pass
