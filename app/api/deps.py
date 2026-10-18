@@ -103,7 +103,7 @@ def get_task_filters(
 ) -> TaskFilters:
     if assignee_id is not None and unassigned:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="assignee_id and unassigned cannot be used together",
         )
     return TaskFilters(
