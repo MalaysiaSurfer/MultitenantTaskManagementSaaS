@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.constants import INT4_MAX
 from app.db.base import TaskStatus
+from app.schemas.pagination import Page
 
 
 class OrganizationTask(NamedTuple):
@@ -28,9 +29,7 @@ class TaskOut(BaseModel):
     assignee_id: int | None
 
 
-class TasksPage(BaseModel):
-    items: list[TaskOut]
-    next_cursor: int | None
+TasksPage = Page[TaskOut]
 
 
 class TaskFilters(BaseModel):

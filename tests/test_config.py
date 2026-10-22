@@ -1,3 +1,6 @@
+import json
+import logging
+
 import pytest
 from app.core.config import Settings
 from pydantic import ValidationError
@@ -22,6 +25,35 @@ def test_settings_default_to_safe_production(monkeypatch):
     config = Settings(_env_file=None, secret_key=GOOD_KEY, database_url=DATABASE_URL)
     assert config.environment == "prod"
     assert config.log_json is True
+
+
+def test_production_app_disables_docs_and_uses_json_logging():
+    from app.main import RequestFormatter, configure_logging, create_app
+
+    config = Settings(
+        _env_file=None,
+        secret_key=GOOD_KEY,
+        database_url=DATABASE_URL,
+        environment="prod",
+        log_json=False,
+    )
+    assert create_app(config).docs_url is None
+    assert create_app(config).redoc_url is None
+    assert create_app(config).openapi_url is None
+
+    root = logging.getLogger()
+    old_handlers, old_level = root.handlers[:], root.level
+    try:
+        configure_logging(config)
+        assert isinstance(root.handlers[0].formatter, RequestFormatter)
+        record = logging.LogRecord("production", logging.INFO, "", 0, "ready", (), None)
+        record.request_id = "req-1"
+        record.user_id = "-"
+        record.organization_id = "-"
+        assert json.loads(root.handlers[0].formatter.format(record))["message"] == "ready"
+    finally:
+        root.handlers = old_handlers
+        root.setLevel(old_level)
 
 
 def test_settings_reject_unknown_environment():

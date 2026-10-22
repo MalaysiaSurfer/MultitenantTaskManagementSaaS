@@ -20,6 +20,7 @@ def create_token(
     user_id: int,
     token_type: str,
     expires_delta: timedelta,
+    session_version: int | None = None,
 ) -> str:
 
     expire = datetime.now(UTC) + expires_delta
@@ -31,6 +32,8 @@ def create_token(
         "iat": datetime.now(UTC),
         "jti": str(uuid.uuid4()),
     }
+    if session_version is not None:
+        payload["sv"] = session_version
 
     return jwt.encode(
         payload,

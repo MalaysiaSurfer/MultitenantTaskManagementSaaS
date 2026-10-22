@@ -22,6 +22,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --frozen
+      - run: uv export --no-hashes --no-dev --no-emit-project -o requirements.txt
+      - run: git diff --exit-code -- requirements.txt
+      - run: uv export --no-hashes --only-dev --no-emit-project -o requirements-dev.txt
+      - run: git diff --exit-code -- requirements-dev.txt
       - run: uv run ruff check .
       - run: uv run ruff format --check .
 

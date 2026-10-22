@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import text
 
 from tests.helpers import create_project, create_task
 
@@ -14,6 +15,15 @@ async def test_project_create_update_and_duplicate_names(client, user_factory):
         f"/projects/{project_id}", headers=actor.headers, json={"name": "Plan 2"}
     )
     assert renamed.status_code == 200 and renamed.json()["name"] == "Plan 2"
+    other = await create_project(client, actor.token, actor.org_id, "Taken")
+    assert other.status_code == 201
+    conflict = await client.patch(
+        f"/projects/{project_id}", headers=actor.headers, json={"name": "Taken"}
+    )
+    assert conflict.status_code == 409
+    assert (await client.get(f"/projects/{project_id}", headers=actor.headers)).json()[
+        "name"
+    ] == "Plan 2"
     assert (await create_project(client, actor.token, actor.org_id, "Plan 2")).status_code == 409
 
 
@@ -164,3 +174,37 @@ async def test_task_filters_match_rows_and_combine(client, user_factory):
         response = await client.get(f"/tasks?{query}", headers=actor.headers)
         assert response.status_code == 200
         assert {item["id"] for item in response.json()["items"]} == expected_ids
+
+
+@pytest.mark.asyncio
+async def test_task_filter_indexes_are_selected_by_explain(client, user_factory, session_factory):
+    actor = await user_factory("explain@example.com", "Explain")
+    project = (await create_project(client, actor.token, actor.org_id, "Index data")).json()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                """INSERT INTO tasks
+                    (organization_id, project_id, title, description, status, assignee_id)
+                SELECT :org_id, :project_id, 'index-' || n, 'seed',
+                       CASE WHEN n <= 5 THEN 'todo'::task_status ELSE 'done'::task_status END,
+                       CASE WHEN n = 1 THEN CAST(:user_id AS INTEGER) ELSE NULL END
+                FROM generate_series(1, 8000) AS n"""
+            ),
+            {"org_id": actor.org_id, "project_id": project["id"], "user_id": actor.user_id},
+        )
+        await db.execute(text("ANALYZE tasks"))
+        status_plan = await db.scalar(
+            text(
+                "EXPLAIN SELECT id FROM tasks WHERE organization_id = :org_id AND status = 'todo'"
+            ),
+            {"org_id": actor.org_id},
+        )
+        assignee_plan = await db.scalar(
+            text(
+                "EXPLAIN SELECT id FROM tasks "
+                "WHERE organization_id = :org_id AND assignee_id = :user_id"
+            ),
+            {"org_id": actor.org_id, "user_id": actor.user_id},
+        )
+    assert "ix_tasks_organization_status" in status_plan
+    assert "ix_tasks_organization_assignee" in assignee_plan

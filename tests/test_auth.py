@@ -174,6 +174,30 @@ async def test_refresh_token_is_revoked_after_refresh(client, user_factory):
 
 
 @pytest.mark.asyncio
+async def test_reused_refresh_token_revokes_other_existing_sessions(client, user_factory):
+    await user_factory("reuse-sessions@example.com", "Reuse sessions")
+    first = (await login(client, "reuse-sessions@example.com")).json()["refresh_token"]
+    second = (await login(client, "reuse-sessions@example.com")).json()["refresh_token"]
+    rotated = await client.post("/auth/refresh", json={"refresh_token": first})
+    assert rotated.status_code == 200
+    assert (await client.post("/auth/refresh", json={"refresh_token": first})).status_code == 401
+    assert (
+        await client.post("/auth/refresh", json={"refresh_token": rotated.json()["refresh_token"]})
+    ).status_code == 401
+    assert (await client.post("/auth/refresh", json={"refresh_token": second})).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_logout_revokes_only_the_provided_refresh_session(client, user_factory):
+    await user_factory("logout-sessions@example.com", "Logout sessions")
+    current = (await login(client, "logout-sessions@example.com")).json()["refresh_token"]
+    other = (await login(client, "logout-sessions@example.com")).json()["refresh_token"]
+    assert (await client.post("/auth/logout", json={"refresh_token": current})).status_code == 204
+    assert (await client.post("/auth/refresh", json={"refresh_token": current})).status_code == 401
+    assert (await client.post("/auth/refresh", json={"refresh_token": other})).status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_login_rate_limit_returns_retry_after(client, redis_client):
     from app.core.config import settings
 

@@ -33,7 +33,7 @@ async def get_organization_projects(
     organization_id: int,
     limit: int = 20,
     cursor: int | None = None,
-) -> Page:
+) -> Page[OrganizationProject]:
     stmt = (
         select(
             Project.id,

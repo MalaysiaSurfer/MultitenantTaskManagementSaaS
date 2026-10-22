@@ -2,6 +2,8 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.pagination import Page
+
 
 class OrganizationProject(NamedTuple):
     id: int
@@ -17,9 +19,7 @@ class ProjectOut(BaseModel):
     name: str
 
 
-class ProjectsPage(BaseModel):
-    items: list[ProjectOut]
-    next_cursor: int | None
+ProjectsPage = Page[ProjectOut]
 
 
 class CreateProjectRequest(BaseModel):

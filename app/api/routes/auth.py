@@ -31,6 +31,17 @@ from app.services.auth import authenticate_user, register_user
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+async def _revoke_all_user_sessions(redis: Redis, user_id: int) -> None:
+    key = f"jwt:session-version:{user_id}"
+    await redis.incr(key)
+    await redis.expire(key, settings.refresh_token_expire_days * 24 * 60 * 60)
+
+
+async def _get_session_version(redis: Redis, user_id: int) -> int:
+    version = await redis.get(f"jwt:session-version:{user_id}")
+    return int(version or 0)
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(
     data: RegisterRequest, db: Annotated[AsyncSession, Depends(get_db)]
@@ -74,16 +85,25 @@ async def login(
 
     await complete_login_success(redis, request, form_data.username)
 
+    try:
+        session_version = await _get_session_version(redis, user.id)
+    except REDIS_UNAVAILABLE_ERRORS:
+        # Refresh fails closed while Redis is unavailable. A zero-version token
+        # also stays invalid if Redis later reports a revocation generation.
+        session_version = 0
+
     access_token = create_token(
         user_id=user.id,
         token_type="access",
         expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
+        session_version=session_version,
     )
 
     refresh_token = create_token(
         user_id=user.id,
         token_type="refresh",
         expires_delta=timedelta(days=settings.refresh_token_expire_days),
+        session_version=session_version,
     )
 
     return {
@@ -120,12 +140,27 @@ async def refresh(
 
     try:
         is_revoked = await redis.get(revoked_key)
+        session_version = await _get_session_version(redis, user_id)
     except REDIS_UNAVAILABLE_ERRORS:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication service unavailable",
         ) from None
     if is_revoked:
+        if is_revoked == "rotated":
+            try:
+                await _revoke_all_user_sessions(redis, user_id)
+            except REDIS_UNAVAILABLE_ERRORS:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Authentication service unavailable",
+                ) from None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if int(payload.get("sv", 0)) < session_version:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid refresh token",
@@ -134,13 +169,20 @@ async def refresh(
 
     user = await get_active_user(db, user_id)
     try:
-        stored = await redis.set(revoked_key, "1", ex=remaining_seconds, nx=True)
+        stored = await redis.set(revoked_key, "rotated", ex=remaining_seconds, nx=True)
     except REDIS_UNAVAILABLE_ERRORS:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication service unavailable",
         ) from None
     if not stored:
+        try:
+            await _revoke_all_user_sessions(redis, user_id)
+        except REDIS_UNAVAILABLE_ERRORS:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service unavailable",
+            ) from None
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid refresh token",
@@ -151,6 +193,7 @@ async def refresh(
         user_id=user_id,
         token_type="access",
         expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
+        session_version=session_version,
     )
 
     refresh_token = create_token(
@@ -159,6 +202,7 @@ async def refresh(
         expires_delta=timedelta(
             days=settings.refresh_token_expire_days,
         ),
+        session_version=session_version,
     )
 
     return {
@@ -166,6 +210,35 @@ async def refresh(
         "refresh_token": refresh_token,
         "token_type": "bearer",
     }
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    data: RefreshRequest,
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> None:
+    try:
+        payload = decode_token_payload(data.refresh_token, "refresh")
+    except InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    remaining_seconds = int(payload["exp"] - datetime.now(UTC).timestamp())
+    if remaining_seconds <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        await redis.set(f"jwt:denylist:{payload['jti']}", "logout", ex=remaining_seconds, nx=True)
+    except REDIS_UNAVAILABLE_ERRORS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
+        ) from None
 
 
 @router.get("/me")

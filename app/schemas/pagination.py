@@ -1,8 +1,6 @@
 from pydantic import BaseModel, Field
 
 from app.core.constants import INT4_MAX
-from app.schemas.project import OrganizationProject
-from app.schemas.task import OrganizationTask
 
 
 class PaginationParams(BaseModel):
@@ -10,6 +8,6 @@ class PaginationParams(BaseModel):
     cursor: int | None = Field(default=None, ge=1, le=INT4_MAX)
 
 
-class Page(BaseModel):
-    items: list[OrganizationProject] | list[OrganizationTask]
+class Page[T](BaseModel):
+    items: list[T]
     next_cursor: int | None

@@ -16,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
+    foreign,
     mapped_column,
     relationship,
 )
@@ -63,12 +64,18 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     memberships: Mapped[list["Membership"]] = relationship(back_populates="user")
-    assigned_tasks: Mapped[list["Task"]] = relationship(back_populates="assignee")
+    assigned_tasks: Mapped[list["Task"]] = relationship(
+        primaryjoin=lambda: User.id == foreign(Task.assignee_id),
+        back_populates="assignee",
+        viewonly=True,
+    )
 
 
 class Membership(Base):
     __tablename__ = "memberships"
-    __table_args__ = (UniqueConstraint("user_id", "organization_id"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "organization_id", name="uq_memberships_user_organization"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"))
@@ -111,6 +118,13 @@ class Task(Base):
             ["projects.id", "projects.organization_id"],
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["assignee_id", "organization_id"],
+            ["memberships.user_id", "memberships.organization_id"],
+            ondelete="SET NULL (assignee_id)",
+        ),
+        Index("ix_tasks_organization_status", "organization_id", "status"),
+        Index("ix_tasks_organization_assignee", "organization_id", "assignee_id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(
@@ -127,12 +141,14 @@ class Task(Base):
         ),
         default=TaskStatus.TODO,
     )
-    assignee_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    assignee_id: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     project: Mapped["Project"] = relationship(back_populates="tasks")
-    assignee: Mapped["User | None"] = relationship(back_populates="assigned_tasks")
+    assignee: Mapped["User | None"] = relationship(
+        primaryjoin=lambda: foreign(Task.assignee_id) == User.id,
+        back_populates="assigned_tasks",
+        viewonly=True,
+    )
 
 
 class Invitation(Base):

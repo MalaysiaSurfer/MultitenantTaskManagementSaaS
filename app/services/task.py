@@ -80,7 +80,7 @@ async def get_organization_tasks(
     unassigned: bool = False,
     limit: int = 20,
     cursor: int | None = None,
-) -> Page:
+) -> Page[OrganizationTask]:
     stmt = select(
         Task.id,
         Task.organization_id,

@@ -12,7 +12,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.api.routes import auth, health, invitations, organization, projects, tasks
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.constants import NOT_FOUND
 from app.core.exceptions import NotFoundException
 from app.core.log_context import organization_id_var, request_id_var, user_id_var
@@ -45,10 +45,10 @@ class ContextFilter(logging.Filter):
         return True
 
 
-def configure_logging() -> None:
+def configure_logging(config: Settings = settings) -> None:
     handler = logging.StreamHandler()
     handler.addFilter(ContextFilter())
-    if settings.log_json:
+    if config.log_json:
         handler.setFormatter(RequestFormatter())
     else:
         handler.setFormatter(
@@ -58,12 +58,12 @@ def configure_logging() -> None:
         )
     root = logging.getLogger()
     root.handlers = [handler]
-    root.setLevel(settings.log_level.upper())
+    root.setLevel(config.log_level.upper())
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.handlers = []
         uvicorn_logger.propagate = True
-    if settings.environment == "prod":
+    if config.environment == "prod":
         logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
@@ -93,64 +93,67 @@ async def not_found_exception_handler(request: Request, exc: NotFoundException) 
     return JSONResponse(status_code=404, content={"detail": NOT_FOUND})
 
 
-app = FastAPI(
-    lifespan=lifespan,
-    docs_url=None if settings.environment == "prod" else "/docs",
-    redoc_url=None if settings.environment == "prod" else "/redoc",
-    openapi_url=None if settings.environment == "prod" else "/openapi.json",
-)
-app.add_exception_handler(NotFoundException, not_found_exception_handler)
-
-
-@app.middleware("http")
-async def request_logging(request: Request, call_next):
-    candidate_request_id = request.headers.get("X-Request-ID", "")
-    request_id = (
-        candidate_request_id
-        if len(candidate_request_id) <= 128
-        and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", candidate_request_id)
-        else str(uuid.uuid4())
+def create_app(config: Settings = settings) -> FastAPI:
+    application = FastAPI(
+        lifespan=lifespan,
+        docs_url=None if config.environment == "prod" else "/docs",
+        redoc_url=None if config.environment == "prod" else "/redoc",
+        openapi_url=None if config.environment == "prod" else "/openapi.json",
     )
-    token = request_id_var.set(request_id)
-    user_token = user_id_var.set("-")
-    organization_token = organization_id_var.set("-")
-    started = time.perf_counter()
-    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
-    try:
-        try:
-            response = await call_next(request)
-            status_code = response.status_code
-        except Exception as exc:
-            logger.error(
-                "Unhandled request exception",
-                exc_info=(type(exc), exc, exc.__traceback__),
-            )
-            response = JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": "Internal server error"},
-            )
-        response.headers["X-Request-ID"] = request_id
-        logger.info(
-            "HTTP request method=%s path=%s status=%s duration_ms=%.2f",
-            request.method,
-            request.url.path,
-            status_code,
-            (time.perf_counter() - started) * 1000,
-            extra={
-                "user_id": request.scope.get("state", {}).get("user_id", "-"),
-                "organization_id": request.scope.get("state", {}).get("organization_id", "-"),
-            },
+    application.add_exception_handler(NotFoundException, not_found_exception_handler)
+
+    @application.middleware("http")
+    async def request_logging(request: Request, call_next):
+        candidate_request_id = request.headers.get("X-Request-ID", "")
+        request_id = (
+            candidate_request_id
+            if len(candidate_request_id) <= 128
+            and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", candidate_request_id)
+            else str(uuid.uuid4())
         )
-        return response
-    finally:
-        request_id_var.reset(token)
-        user_id_var.reset(user_token)
-        organization_id_var.reset(organization_token)
+        token = request_id_var.set(request_id)
+        user_token = user_id_var.set("-")
+        organization_token = organization_id_var.set("-")
+        started = time.perf_counter()
+        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        try:
+            try:
+                response = await call_next(request)
+                status_code = response.status_code
+            except Exception as exc:
+                logger.error(
+                    "Unhandled request exception",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                response = JSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    content={"detail": "Internal server error"},
+                )
+            response.headers["X-Request-ID"] = request_id
+            logger.info(
+                "HTTP request method=%s path=%s status=%s duration_ms=%.2f",
+                request.method,
+                request.url.path,
+                status_code,
+                (time.perf_counter() - started) * 1000,
+                extra={
+                    "user_id": request.scope.get("state", {}).get("user_id", "-"),
+                    "organization_id": request.scope.get("state", {}).get("organization_id", "-"),
+                },
+            )
+            return response
+        finally:
+            request_id_var.reset(token)
+            user_id_var.reset(user_token)
+            organization_id_var.reset(organization_token)
+
+    application.include_router(health.router)
+    application.include_router(auth.router)
+    application.include_router(organization.router)
+    application.include_router(projects.router)
+    application.include_router(tasks.router)
+    application.include_router(invitations.router)
+    return application
 
 
-app.include_router(health.router)
-app.include_router(auth.router)
-app.include_router(organization.router)
-app.include_router(projects.router)
-app.include_router(tasks.router)
-app.include_router(invitations.router)
+app = create_app()
