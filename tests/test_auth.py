@@ -1,13 +1,15 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
+from app.api.rate_limit import login_rate_limit_keys
 from app.core.config import settings
 from app.core.security import create_token
 from app.db.base import Organization, User
 from sqlalchemy import delete, func, select
 
-from tests.helpers import auth_headers, login, register_user
+from tests.helpers import TEST_CLIENT_IP, auth_headers, login, register_user
 
 
 @pytest.mark.asyncio
@@ -163,15 +165,165 @@ async def test_refresh_rejects_deleted_user(client, user_factory, session_factor
     assert (await client.post("/auth/refresh", json={"refresh_token": refresh})).status_code == 401
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Refresh tokens are not revoked yet; planned Redis jti denylist (README: Known limitations)"
-    ),
-    strict=True,
-)
 @pytest.mark.asyncio
 async def test_refresh_token_is_revoked_after_refresh(client, user_factory):
     await user_factory("revocation@example.com", "Revocation")
     refresh = (await login(client, "revocation@example.com")).json()["refresh_token"]
     assert (await client.post("/auth/refresh", json={"refresh_token": refresh})).status_code == 200
     assert (await client.post("/auth/refresh", json={"refresh_token": refresh})).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_returns_retry_after(client, redis_client):
+    from app.core.config import settings
+
+    for _ in range(settings.login_rate_limit_attempts):
+        assert (await login(client, "blocked@example.com", "wrong password")).status_code == 401
+    limited = await login(client, "blocked@example.com", "wrong password")
+    assert limited.status_code == 429
+    assert int(limited.headers["Retry-After"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_keeps_separate_email_pair_counters(client, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "login_rate_limit_ip_multiplier", 100)
+    for _ in range(settings.login_rate_limit_attempts):
+        assert (await login(client, "first@example.com", "wrong password")).status_code == 401
+    assert (await login(client, "first@example.com", "wrong password")).status_code == 429
+    for _ in range(settings.login_rate_limit_attempts):
+        assert (await login(client, "second@example.com", "wrong password")).status_code == 401
+    assert (await login(client, "second@example.com", "wrong password")).status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_ip_counter_catches_many_emails(client):
+    from app.core.config import settings
+
+    for email_index in range(settings.login_rate_limit_ip_multiplier):
+        for _ in range(settings.login_rate_limit_attempts):
+            response = await login(client, f"bot{email_index}@example.com", "wrong password")
+            assert response.status_code == 401
+    limited = await login(client, "new-email@example.com", "wrong password")
+    assert limited.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_window_can_expire(client, redis_client):
+    from app.core.config import settings
+
+    for _ in range(settings.login_rate_limit_attempts):
+        await login(client, "window@example.com", "wrong password")
+    ip_key, pair_key = login_rate_limit_keys(TEST_CLIENT_IP, "window@example.com")
+    await redis_client.expire(pair_key, -1)
+    await redis_client.expire(ip_key, -1)
+    response = await login(client, "window@example.com", "wrong password")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_sets_ttl_on_first_failure(client, redis_client):
+    from app.core.config import settings
+
+    await login(client, "ttl@example.com", "wrong password")
+    _, pair_key = login_rate_limit_keys(TEST_CLIENT_IP, "ttl@example.com")
+    ttl = await redis_client.ttl(pair_key)
+    assert 0 < ttl <= settings.login_rate_limit_window_seconds
+
+
+@pytest.mark.asyncio
+async def test_concurrent_login_attempts_are_reserved_atomically(client):
+    from app.core.config import settings
+
+    attempts = settings.login_rate_limit_attempts
+    responses = await asyncio.gather(
+        *(login(client, "parallel@example.com", "wrong password") for _ in range(attempts * 4))
+    )
+    assert sum(response.status_code == 401 for response in responses) == attempts
+    assert sum(response.status_code == 429 for response in responses) == attempts * 3
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_is_fail_open_when_redis_is_unavailable(client, app):
+    from app.api.rate_limit import get_redis
+
+    class BrokenRedis:
+        async def eval(self, *args):
+            from redis.exceptions import ConnectionError as RedisConnectionError
+
+            raise RedisConnectionError("Redis unavailable")
+
+    app.dependency_overrides[get_redis] = lambda: BrokenRedis()
+    response = await login(client, "outage@example.com", "wrong password")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limiter_does_not_hide_redis_script_errors(client, app):
+    from app.api.rate_limit import get_redis
+    from redis.exceptions import ResponseError
+
+    class BrokenRedis:
+        async def eval(self, *args):
+            raise ResponseError("script has an invalid argument")
+
+    app.dependency_overrides[get_redis] = lambda: BrokenRedis()
+    response = await login(client, "script-error@example.com", "wrong password")
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error"}
+
+
+@pytest.mark.asyncio
+async def test_successful_login_clears_pair_counter(client, user_factory, redis_client):
+    await user_factory("reset@example.com", "Reset")
+    ip_key, pair_key = login_rate_limit_keys(TEST_CLIENT_IP, "reset@example.com")
+    assert await redis_client.get(ip_key) is None
+    response = await login(client, "reset@example.com", "incorrect password")
+    assert response.status_code == 401
+    assert await redis_client.get(pair_key) == "1"
+    assert (await login(client, "reset@example.com")).status_code == 200
+    assert await redis_client.get(pair_key) is None
+    assert await redis_client.get(ip_key) == "1"
+
+
+@pytest.mark.asyncio
+async def test_refresh_rejects_non_integer_subject(client, user_factory):
+    await user_factory("bad-subject@example.com", "Bad subject")
+    claims = {
+        "sub": "abc",
+        "type": "refresh",
+        "exp": datetime.now(UTC) + timedelta(minutes=5),
+        "iat": datetime.now(UTC),
+        "jti": "bad-sub-refresh",
+    }
+    token = jwt.encode(claims, settings.secret_key, algorithm="HS256")
+    response = await client.post("/auth/refresh", json={"refresh_token": token})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_parallel_refresh_only_rotates_token_once(client, user_factory):
+    await user_factory("parallel-refresh@example.com", "Parallel refresh")
+    refresh = (await login(client, "parallel-refresh@example.com")).json()["refresh_token"]
+    responses = await asyncio.gather(
+        *(client.post("/auth/refresh", json={"refresh_token": refresh}) for _ in range(2))
+    )
+    assert sorted(response.status_code for response in responses) == [200, 401]
+
+
+@pytest.mark.asyncio
+async def test_refresh_fails_closed_when_redis_is_unavailable(client, app, user_factory):
+    from app.api.rate_limit import get_redis
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    await user_factory("refresh-outage@example.com", "Refresh outage")
+    refresh = (await login(client, "refresh-outage@example.com")).json()["refresh_token"]
+
+    class BrokenRedis:
+        async def get(self, key):
+            raise RedisConnectionError("Redis unavailable")
+
+    app.dependency_overrides[get_redis] = lambda: BrokenRedis()
+    response = await client.post("/auth/refresh", json={"refresh_token": refresh})
+    assert response.status_code == 503

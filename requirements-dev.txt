@@ -38,6 +38,8 @@ python-dotenv==1.2.4
     # via testcontainers
 pywin32==312 ; sys_platform == 'win32'
     # via docker
+redis==8.1.0
+    # via testcontainers
 requests==2.34.2
     # via docker
 ruff==0.16.10

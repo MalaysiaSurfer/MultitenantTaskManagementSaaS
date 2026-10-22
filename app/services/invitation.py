@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import AlreadyMember, NotFoundException
 from app.db.base import Invitation, Membership, MembershipRole, User
 from app.schemas.invitation import InvitationAccepted, InvitationRequest
@@ -55,9 +56,12 @@ async def send_user_invitation(
     await db.execute(stmt)
     await db.commit()
 
-    logger.info(
-        "Invitation for %s to organization %s, token=%s", data.email, organization_id, token
-    )
+    if settings.environment != "prod":
+        logger.info(
+            "Invitation for %s to organization %s, token=%s", data.email, organization_id, token
+        )
+    else:
+        logger.info("Invitation created for organization %s", organization_id)
 
 
 async def accept_user_invitation(

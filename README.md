@@ -1,5 +1,7 @@
 # Multitenant Task Management SaaS
 
+[![CI](https://github.com/MalaysiaSurfer/MultitenantTaskManagementSaaS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MalaysiaSurfer/MultitenantTaskManagementSaaS/actions/workflows/ci.yml)
+
 Мини-Trello/Jira: организации, роли, проекты, задачи. FastAPI, PostgreSQL,
 SQLAlchemy 2.0 (async), Alembic, Redis, Docker Compose.
 
@@ -7,11 +9,63 @@ SQLAlchemy 2.0 (async), Alembic, Redis, Docker Compose.
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
-docker compose exec api alembic upgrade head
+# Сгенерируйте ключ: openssl rand -hex 32
+# Заполните POSTGRES_PASSWORD, SECRET_KEY и DATABASE_URL в .env
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec api alembic upgrade head
 ```
 
 Swagger: http://localhost:8000/docs
+
+## Dev и prod
+
+`docker-compose.yml` — базовая production-конфигурация: без reload и без публикации портов PostgreSQL и Redis; безопасный режим по умолчанию — `prod`. Для разработки явно добавьте `docker-compose.dev.yml`: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build`. Dev-файл включает reload, исходники как volumes, `ENVIRONMENT=dev` и порты БД/Redis, привязанные только к `127.0.0.1`. Compose не подхватывает его автоматически. Перед запуском заполните `.env`: задайте `POSTGRES_PASSWORD`, согласованный `DATABASE_URL` и сгенерируйте `SECRET_KEY` командой `openssl rand -hex 32`.
+
+В production всегда используется `ENVIRONMENT=prod` (или задайте `APP_ENVIRONMENT` для другого режима), JSON-логирование принудительно включено, а слабый `SECRET_KEY` завершает запуск ошибкой. Swagger, ReDoc и OpenAPI выключены. Docker CMD использует `--proxy-headers`, `--forwarded-allow-ips` и `--no-access-log`; список доверенных прокси задаётся через `FORWARDED_ALLOW_IPS` и по умолчанию ограничен `127.0.0.1`. Прокси сейчас не входит в compose. При размещении за reverse proxy укажите его конкретный IP/CIDR; не задавайте `*`, иначе клиент сможет подделать IP и обходить лимитер. Без прокси Uvicorn использует адрес прямого клиента, X-Forwarded-For не читается приложением.
+
+## Конфигурация
+
+| Переменная | Обязательна | По умолчанию | Назначение |
+|---|---:|---|---|
+| `ENVIRONMENT` | нет | `prod` | `dev`, `test` или `prod`; в dev-образе задаётся явно |
+| `APP_ENVIRONMENT` | нет | `prod` | Переопределение `ENVIRONMENT` для базового Compose |
+| `SECRET_KEY` | да | — | Ключ JWT; в prod не короче 32 символов и не placeholder |
+| `DATABASE_URL` | да | — | Async URL PostgreSQL |
+| `POSTGRES_USER` | compose | — | Пользователь PostgreSQL |
+| `POSTGRES_PASSWORD` | compose | — | Пароль PostgreSQL из `.env` |
+| `POSTGRES_DB` | compose | — | Имя БД |
+| `REDIS_URL` | нет | `redis://redis:6379/0` | Redis для rate limit и denylist refresh JWT |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | нет | `15` | Срок access JWT |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | нет | `30` | Срок refresh JWT |
+| `INVITATION_EXPIRE_DAYS` | нет | `7` | Срок приглашения |
+| `LOG_LEVEL` | нет | `INFO` | Уровень логирования |
+| `LOG_JSON` | нет | `false` (`true` в prod) | JSON-формат логов |
+| `SQL_ECHO` | нет | `false` | SQLAlchemy echo |
+| `LOGIN_RATE_LIMIT_ATTEMPTS` | нет | `5` | Неудачи на пару IP/email за окно |
+| `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | нет | `300` | Длина окна rate limit |
+| `LOGIN_RATE_LIMIT_IP_MULTIPLIER` | нет | `5` | Порог IP относительно порога пары |
+| `FORWARDED_ALLOW_IPS` | нет | `127.0.0.1` | Доверенные прокси для Uvicorn |
+
+## Архитектура
+
+```mermaid
+flowchart LR
+  C[Клиент] --> API[FastAPI]
+  API --> PG[(PostgreSQL)]
+  API --> R[(Redis: rate limit и denylist refresh JWT)]
+  U[get_current_user] --> M[get_current_membership]
+  M --> RR[require_role]
+```
+
+## Ограничение попыток входа
+
+Используется fixed window: Lua-скрипт атомарно проверяет оба счётчика, резервирует попытку и выставляет `EXPIRE` при первом значении до проверки пароля. Это закрывает check-then-act гонку при параллельных запросах. Отдельные ключи считают IP и пару `(IP, нормализованный email)`; email в ключе хэшируется. Пара блокируется после заданного числа зарезервированных попыток, общий IP-порог задаётся множителем, чтобы NAT-порог был выше. Успешный вход удаляет счётчик пары и освобождает одну IP-резервацию, поэтому успешные пользователи не расходуют общий лимит. Неудачные проверки остаются посчитанными. Лимитер не различает неизвестный email и неверный пароль; оба ответа одинаковы. Превышение даёт `429` и `Retry-After`.
+
+Fixed window прост и дешёв, но на границе соседних окон допускает почти двойной лимит за короткое время. Sliding window log точнее, но хранит временные отметки и дороже; token bucket допускает контролируемый burst и плавное восстановление. При недоступности Redis действует fail-open для rate limit: вход продолжает работать, а приложение пишет warning. Ротация refresh-токена действует fail-closed с `503`, потому что без denylist нельзя гарантировать однократное использование токена. Повторное предъявление уже использованного refresh отклоняется, но пока не отзывает остальные пользовательские сессии; `/auth/logout` ещё не реализован.
+
+## Логирование и приватность
+
+Каждому запросу назначается `X-Request-ID` (входной или UUID), он возвращается в ответе и добавляется к прикладным логам. Access-событие содержит метод, путь без query string, статус и длительность. В production используется JSON по одной строке на событие. Пароли, Authorization и JWT не журналируются. Токен приглашения выводится в dev/test для существующих интеграционных тестов, но не в prod; отправка писем пока не подключена. Uvicorn access log отключён по умолчанию.
 
 ## Зависимости
 
@@ -115,6 +169,8 @@ uv export --no-hashes --only-dev --no-emit-project -o requirements-dev.txt
 |---|---|
 | `201 Created` | Объект успешно создан |
 | `202 Accepted` | Приглашение обработано (`POST /organizations/invite`) |
+| `429 Too Many Requests` | Превышен лимит неудачных попыток входа; ответ содержит `Retry-After` |
+| `503 Service Unavailable` | Refresh-ротация не может проверить denylist Redis или сервис не готов |
 | `204 No Content` | Объект успешно удалён |
 | `401 Unauthorized` | Отсутствует или невалиден токен |
 | `403 Forbidden` | Пользователь состоит в организации, но его роль недостаточна |
@@ -187,7 +243,7 @@ GET /tasks?status=todo&assignee_id=5&project_id=3
 
 ## Интеграционные тесты
 
-Тесты используют настоящий PostgreSQL 16 в Testcontainers и применяют схему миграциями Alembic. Моки базы данных не используются. Для запуска нужен Docker daemon (например, запущенный Docker Desktop); отдельно поднимать API или PostgreSQL не требуется.
+Интеграционные тесты используют PostgreSQL 16 и Redis в Testcontainers и применяют схему миграциями Alembic. Чистые проверки конфигурации запускаются без контейнеров. Для интеграционных тестов нужен Docker daemon (например, запущенный Docker Desktop); отдельно поднимать API, PostgreSQL или Redis не требуется.
 
 ```bash
 uv run pytest
@@ -199,9 +255,9 @@ uv run pytest
 PYTEST_REVERSE_ORDER=1 uv run pytest
 ```
 
-Контейнер и test engine имеют session scope. Pytest использует один session event loop; `NullPool` не удерживает asyncpg-соединения между его использованиями. После каждого теста выполняется `TRUNCATE ... RESTART IDENTITY CASCADE` по таблицам из `Base.metadata.sorted_tables`. Это нужно, потому что сервисы самостоятельно фиксируют транзакции через `commit()`, так что откат внешней транзакции не изолировал бы тестовые данные. Повторный запуск получает новую БД, а порядок тестов не влияет на их состояние. Отдельный тест запускает `alembic check`, чтобы модели и миграции оставались синхронными.
+Контейнеры и test engine имеют session scope. Pytest использует один session event loop; `NullPool` не удерживает asyncpg-соединения между его использованиями. Каждый тест, использующий интеграционный `client`, получает очистку PostgreSQL через `TRUNCATE ... RESTART IDENTITY CASCADE` и Redis через `FLUSHDB`. Прямые тесты БД запрашивают ту же фикстуру явно; unit-тесты конфигурации не поднимают контейнеры. Это нужно, потому что сервисы самостоятельно фиксируют транзакции через `commit()`, так что откат внешней транзакции не изолировал бы тестовые данные. Отдельный тест запускает `alembic check`, чтобы модели и миграции оставались синхронными.
 
-Регрессионные проверки проверены мутациями: каждый вариант ниже временно вносился в код, и указанный тест завершался ошибкой.
+Регрессионные проверки для ранее проверенных мутаций и добавленных security-сценариев:
 
 | Временная мутация | Тест, который упал |
 |---|---|
@@ -212,21 +268,33 @@ PYTEST_REVERSE_ORDER=1 uv run pytest
 | Убрать `is_active` из `get_active_user` | `test_inactive_user_cannot_login_or_use_existing_token` |
 | Всегда назначать `MembershipRole.MEMBER` при принятии приглашения | `test_owner_can_invite_and_grant_admin_role` |
 | Отправлять приглашение до проверки роли | `test_invitation_role_policy_rejects_before_persisting_invitation` |
-
-Тест отзыва refresh-токена отмечен строгим `xfail`: сейчас refresh не отзывается; план — denylist по `jti` в Redis. Когда denylist появится, `XPASS` потребует явно пересмотреть и снять маркер.
+| Убрать защиту SECRET_KEY в prod | `test_production_rejects_weak_and_placeholder_secrets` |
+| Сменить prod на небезопасный dev default | `test_settings_default_to_safe_production` |
+| Убрать лимит по паре IP/email | `test_login_rate_limit_returns_retry_after` |
+| Перенести инкремент после Argon2 | `test_concurrent_login_attempts_are_reserved_atomically` |
+| Убрать EXPIRE у первого резервирования | `test_login_rate_limit_sets_ttl_on_first_failure` |
+| Убрать общий IP-счётчик | `test_login_rate_limit_ip_counter_catches_many_emails` |
+| Не сбрасывать пару после успешного входа | `test_successful_login_clears_pair_counter` |
+| Не добавлять использованный refresh jti в denylist | `test_refresh_token_is_revoked_after_refresh` |
+| Заменить атомарный SET NX на GET/SET | `test_parallel_refresh_only_rotates_token_once` |
+| Не отклонять нечисловой refresh sub | `test_refresh_rejects_non_integer_subject` |
+| Считать Redis outage успешной refresh-ротацией | `test_refresh_fails_closed_when_redis_is_unavailable` |
+| Не проверять зависимости в readiness | `test_readiness_returns_503_when_redis_is_unavailable` |
 
 `scripts/isolation_check.py` оставлен как необязательная проверка против запущенного живого стенда; он может создавать данные в БД стенда. Для приёмки используйте pytest, который запускается в отдельном контейнере и не оставляет данные в рабочей базе.
 
 ## Известные ограничения
 
-Refresh-токен не отзывается до истечения срока. План: denylist по `jti` в Redis.
-
-echo=True у engine, --reload в CMD Dockerfile и открытые порты БД и Redis подходят только для разработки. План: удалить или вынести в конфиг.
-
 member может только читать задачи. План: разрешить ему менять статус задачи через assignee_id.
 
 Если исполнителя исключат между проверкой членства и `update`, назначение пройдёт.
 
-Токен пишется в лог, письма не отправляются, нет отзыва и списка приглашений, ответ invite одинаковый по статусу и телу, но не по времени. Интеграционные тесты извлекают токен приглашения из лога; когда появится отправка писем, в тестах нужно будет подменить отправителя.
+В dev/test токен приглашения пишется в лог для интеграционных тестов; в production токен не пишется, но отправка писем ещё не реализована, поэтому приглашения сейчас не доставляются. Нет списка приглашений; ответ invite одинаковый по статусу и телу, но не по времени.
+
+Redis хранит denylist refresh-токенов в AOF на named volume с `maxmemory-policy=noeviction`. AOF синхронизируется раз в секунду по настройке Redis по умолчанию, поэтому аварийное отключение хоста может потерять до последней секунды записей отзыва. При исчерпании 256 MB Redis отклоняет новые записи вместо вытеснения denylist; refresh отвечает `503`, а rate limiter остаётся fail-open.
+
+Production-приглашения пока не доставляются: токен намеренно не попадает в production-логи, а почтовый sender ещё не добавлен. В dev/test токен записывается в лог для текущих интеграционных тестов.
+
+CI не запускает `scripts/isolation_check.py`: он требует живого стенда и может создавать в нём данные.
 
 Для фильтров `GET /tasks` есть только индекс по `organization_id`. План: составные индексы `(organization_id, status)` и `(organization_id, assignee_id)` после проверки через `EXPLAIN` на нескольких тысячах строк.

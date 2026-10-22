@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from httpx import AsyncClient
 
 PASSWORD = "TestPassword123!"
+TEST_CLIENT_IP = "198.51.100.17"
 
 
 @dataclass(frozen=True)

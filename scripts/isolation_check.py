@@ -672,7 +672,7 @@ async def main() -> int:
                 (EMAIL_MEMBER, "existing organization member"),
             )
             privacy_responses: list[tuple[str, httpx.Response]] = []
-            for index, (email, label) in enumerate(privacy_cases):
+            for _index, (email, label) in enumerate(privacy_cases):
                 response = await send_invitation(
                     client,
                     token_a,
@@ -724,7 +724,9 @@ async def main() -> int:
                 details=(
                     "Ensure API INFO logs include the invitation log entry and "
                     "docker compose logs can access the api service."
-                ) if invitation_recipient_token is None else "",
+                )
+                if invitation_recipient_token is None
+                else "",
             )
             if invitation_recipient_token is None:
                 raise RuntimeError("Could not read recipient invitation token from API logs")
@@ -737,9 +739,7 @@ async def main() -> int:
                 "Invitation stores only the token hash",
                 stored_invitation is not None
                 and stored_invitation.token_hash
-                == hashlib.sha256(
-                    invitation_recipient_token.encode("utf-8")
-                ).hexdigest(),
+                == hashlib.sha256(invitation_recipient_token.encode("utf-8")).hexdigest(),
             )
 
             # Пользователь организации B получает 404 на токен приглашения в A;
@@ -795,7 +795,8 @@ async def main() -> int:
                 and extract_named_id(
                     json_body(recipient_orgs_response),
                     ORG_NAME_A,
-                ) is not None,
+                )
+                is not None,
                 response=recipient_orgs_response,
             )
 

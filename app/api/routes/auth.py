@@ -1,15 +1,22 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jwt.exceptions import InvalidTokenError
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_active_user
+from app.api.rate_limit import (
+    REDIS_UNAVAILABLE_ERRORS,
+    complete_login_success,
+    get_redis,
+    login_rate_limit,
+)
 from app.core.config import settings
 from app.core.exceptions import EmailAlreadyRegistered
-from app.core.security import create_token, decode_token
+from app.core.security import create_token, decode_token_payload
 from app.db.session import get_db
 from app.schemas.auth import (
     OrgBrief,
@@ -47,6 +54,9 @@ async def register(
 async def login(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request,
+    redis: Annotated[Redis, Depends(get_redis)],
+    _rate_limit: Annotated[None, Depends(login_rate_limit)],
 ) -> TokenPair:
 
     user = await authenticate_user(
@@ -61,6 +71,8 @@ async def login(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    await complete_login_success(redis, request, form_data.username)
 
     access_token = create_token(
         user_id=user.id,
@@ -82,17 +94,58 @@ async def login(
 
 
 @router.post("/refresh")
-async def refresh(data: RefreshRequest, db: Annotated[AsyncSession, Depends(get_db)]) -> TokenPair:
+async def refresh(
+    data: RefreshRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> TokenPair:
     try:
-        user_id = decode_token(data.refresh_token, "refresh")
-    except InvalidTokenError:
+        payload = decode_token_payload(data.refresh_token, "refresh")
+        user_id = int(payload["sub"])
+    except (InvalidTokenError, ValueError, KeyError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid refresh token",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
 
+    revoked_key = f"jwt:denylist:{payload['jti']}"
+    remaining_seconds = int(payload["exp"] - datetime.now(UTC).timestamp())
+    if remaining_seconds <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        is_revoked = await redis.get(revoked_key)
+    except REDIS_UNAVAILABLE_ERRORS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
+        ) from None
+    if is_revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     user = await get_active_user(db, user_id)
+    try:
+        stored = await redis.set(revoked_key, "1", ex=remaining_seconds, nx=True)
+    except REDIS_UNAVAILABLE_ERRORS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
+        ) from None
+    if not stored:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     access_token = create_token(
         user_id=user_id,

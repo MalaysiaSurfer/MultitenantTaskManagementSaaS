@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Path, Query, status
+from fastapi import Depends, Header, HTTPException, Path, Query, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import INT4_MAX
 from app.core.exceptions import NotFoundException
+from app.core.log_context import organization_id_var, user_id_var
 from app.core.security import decode_token
 from app.db.base import Membership, MembershipRole, TaskStatus, User
 from app.db.session import get_db
@@ -54,6 +55,7 @@ async def get_active_user(db: AsyncSession, user_id: int) -> User:
 
 
 async def get_current_user(
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     token: Annotated[str, Depends(oauth2_scheme)],
 ) -> User:
@@ -67,11 +69,14 @@ async def get_current_user(
         ) from None
 
     user = await get_active_user(db, user_id)
+    user_id_var.set(str(user.id))
+    request.state.user_id = str(user.id)
 
     return user
 
 
 async def get_current_membership(
+    request: Request,
     organization_id: Annotated[int, Header(alias="X-Organization-ID", ge=1, le=INT4_MAX)],
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -85,6 +90,8 @@ async def get_current_membership(
     membership = result.scalar_one_or_none()
     if membership is None:
         raise NotFoundException()
+    organization_id_var.set(str(membership.organization_id))
+    request.state.organization_id = str(membership.organization_id)
     return membership
 
 

@@ -189,7 +189,9 @@ async def test_organizations_list_contains_only_memberships(client, user_factory
 
 
 @pytest.mark.asyncio
-async def test_composite_task_project_foreign_key_names_the_tenant_constraint(session_factory):
+async def test_composite_task_project_foreign_key_names_the_tenant_constraint(
+    session_factory, clean_database
+):
     async with session_factory() as db:
         ua, ub = (
             User(email="a@db.test", hashed_password="x"),

@@ -41,14 +41,18 @@ def create_token(
 
 def decode_token(token: str, expected_type: str) -> int:
     try:
-        payload = jwt.decode(
-            token,
-            settings.secret_key,
-            algorithms=[ALGORITHM],
-            options={"require": ["exp", "sub", "type", "iat", "jti"]},
-        )
-        if payload["type"] != expected_type:
-            raise InvalidTokenError("wrong token type")
-        return int(payload["sub"])
+        return int(decode_token_payload(token, expected_type)["sub"])
     except ValueError:
         raise InvalidTokenError("bad subject") from None
+
+
+def decode_token_payload(token: str, expected_type: str) -> dict:
+    payload = jwt.decode(
+        token,
+        settings.secret_key,
+        algorithms=[ALGORITHM],
+        options={"require": ["exp", "sub", "type", "iat", "jti"]},
+    )
+    if payload["type"] != expected_type:
+        raise InvalidTokenError("wrong token type")
+    return payload
