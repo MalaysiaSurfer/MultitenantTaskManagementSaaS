@@ -35,8 +35,8 @@ from app.services.organization import (
     delete_organization,
     get_organization_members,
     get_user_organizations,
-    rename_organization,
     remove_member,
+    rename_organization,
     update_member_role,
 )
 

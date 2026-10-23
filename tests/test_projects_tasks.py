@@ -187,7 +187,6 @@ async def test_task_assignment_race_returns_not_found_instead_of_500(
     client, user_factory, session_factory, monkeypatch
 ):
     import app.services.task as task_service
-
     from app.db.base import Membership
 
     owner = await user_factory("task-race-owner@example.com", "Task race")
