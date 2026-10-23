@@ -1,16 +1,16 @@
 import hashlib
 import logging
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Interval, bindparam, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AlreadyMember, NotFoundException
-from app.db.base import Invitation, Membership, MembershipRole, User
+from app.db.base import Invitation, InvitationRole, Membership, MembershipRole, User
 from app.schemas.invitation import InvitationAccepted, InvitationRequest
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ async def send_user_invitation(
 
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    expires_at = datetime.now(UTC) + expires_delta
+    expires_at = func.now() + bindparam("invitation_expiration", expires_delta, type_=Interval())
 
     stmt = insert(Invitation).values(
         organization_id=organization_id,
@@ -70,21 +70,49 @@ async def accept_user_invitation(
     email: str,
     token: str,
 ) -> InvitationAccepted:
-    stmt = await db.execute(
-        update(Invitation)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    invitation = await db.execute(
+        select(
+            Invitation.id,
+            Invitation.organization_id,
+            Invitation.role,
+            Membership.role.label("inviter_role"),
+        )
+        .join(
+            Membership,
+            (Membership.organization_id == Invitation.organization_id)
+            & (Membership.user_id == Invitation.invited_by_id),
+        )
         .where(
-            Invitation.token_hash == hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            Invitation.token_hash == token_hash,
             Invitation.email == email,
             Invitation.accepted_at.is_(None),
             Invitation.expires_at > func.now(),
         )
-        .values(accepted_at=func.now())
-        .returning(
-            Invitation.organization_id,
-            Invitation.role,
-        )
+        .with_for_update(of=Membership)
     )
-    result = stmt.one_or_none()
+    invitation = invitation.one_or_none()
+    if invitation is None:
+        raise NotFoundException()
+
+    inviter_is_authorized = invitation.inviter_role == MembershipRole.OWNER or (
+        invitation.role == InvitationRole.MEMBER and invitation.inviter_role == MembershipRole.ADMIN
+    )
+    if not inviter_is_authorized:
+        raise NotFoundException()
+
+    accepted = await db.execute(
+        update(Invitation)
+        .where(
+            Invitation.id == invitation.id,
+            Invitation.token_hash == token_hash,
+            Invitation.accepted_at.is_(None),
+            Invitation.expires_at > func.now(),
+        )
+        .values(accepted_at=func.now())
+        .returning(Invitation.organization_id, Invitation.role)
+    )
+    result = accepted.one_or_none()
 
     if result is None:
         raise NotFoundException()

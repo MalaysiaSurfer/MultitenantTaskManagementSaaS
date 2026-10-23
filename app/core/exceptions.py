@@ -12,3 +12,11 @@ class ProjectAlreadyExists(Exception):
 
 class AlreadyMember(Exception):
     pass
+
+
+class LastOwnerError(Exception):
+    pass
+
+
+class InsufficientPermissions(Exception):
+    pass

@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException, Path, Query, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,10 @@ from app.schemas.pagination import PaginationParams
 from app.schemas.task import TaskFilters
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+async def get_redis(request: Request) -> Redis:
+    return request.app.state.redis
 
 
 ROLE_RANKS: dict[MembershipRole, int] = {

@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api.routes import auth, health, invitations, organization, projects, tasks
 from app.core.config import Settings, settings
@@ -71,6 +72,77 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
+class RequestLoggingMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_headers = dict(scope.get("headers", []))
+        candidate = request_headers.get(b"x-request-id", b"").decode("latin-1")
+        request_id = (
+            candidate
+            if len(candidate) <= 128 and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", candidate)
+            else str(uuid.uuid4())
+        )
+        state = scope.setdefault("state", {})
+        token = request_id_var.set(request_id)
+        user_token = user_id_var.set("-")
+        organization_token = organization_id_var.set("-")
+        started = time.perf_counter()
+        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        response_started = False
+
+        async def send_with_request_id(message):
+            nonlocal status_code, response_started
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                response_started = True
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"x-request-id"
+                ]
+                headers.append((b"x-request-id", request_id.encode("ascii")))
+                message = message | {"headers": headers}
+            await send(message)
+
+        try:
+            try:
+                await self.app(scope, receive, send_with_request_id)
+            except Exception as exc:
+                logger.error(
+                    "Unhandled request exception",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                if not response_started:
+                    response = JSONResponse(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        content={"detail": "Internal server error"},
+                    )
+                    await response(scope, receive, send_with_request_id)
+                else:
+                    raise
+            logger.info(
+                "HTTP request method=%s path=%s status=%s duration_ms=%.2f",
+                scope["method"],
+                scope["path"],
+                status_code,
+                (time.perf_counter() - started) * 1000,
+                extra={
+                    "user_id": state.get("user_id", "-"),
+                    "organization_id": state.get("organization_id", "-"),
+                },
+            )
+        finally:
+            request_id_var.reset(token)
+            user_id_var.reset(user_token)
+            organization_id_var.reset(organization_token)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.redis = Redis.from_url(
@@ -102,50 +174,7 @@ def create_app(config: Settings = settings) -> FastAPI:
     )
     application.add_exception_handler(NotFoundException, not_found_exception_handler)
 
-    @application.middleware("http")
-    async def request_logging(request: Request, call_next):
-        candidate_request_id = request.headers.get("X-Request-ID", "")
-        request_id = (
-            candidate_request_id
-            if len(candidate_request_id) <= 128
-            and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", candidate_request_id)
-            else str(uuid.uuid4())
-        )
-        token = request_id_var.set(request_id)
-        user_token = user_id_var.set("-")
-        organization_token = organization_id_var.set("-")
-        started = time.perf_counter()
-        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
-        try:
-            try:
-                response = await call_next(request)
-                status_code = response.status_code
-            except Exception as exc:
-                logger.error(
-                    "Unhandled request exception",
-                    exc_info=(type(exc), exc, exc.__traceback__),
-                )
-                response = JSONResponse(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    content={"detail": "Internal server error"},
-                )
-            response.headers["X-Request-ID"] = request_id
-            logger.info(
-                "HTTP request method=%s path=%s status=%s duration_ms=%.2f",
-                request.method,
-                request.url.path,
-                status_code,
-                (time.perf_counter() - started) * 1000,
-                extra={
-                    "user_id": request.scope.get("state", {}).get("user_id", "-"),
-                    "organization_id": request.scope.get("state", {}).get("organization_id", "-"),
-                },
-            )
-            return response
-        finally:
-            request_id_var.reset(token)
-            user_id_var.reset(user_token)
-            organization_id_var.reset(organization_token)
+    application.add_middleware(RequestLoggingMiddleware)
 
     application.include_router(health.router)
     application.include_router(auth.router)

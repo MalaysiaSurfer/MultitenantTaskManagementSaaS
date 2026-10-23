@@ -1,8 +1,10 @@
-from typing import NamedTuple
+from typing import Annotated, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from app.schemas.pagination import Page
+
+ProjectName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 
 
 class OrganizationProject(NamedTuple):
@@ -23,4 +25,8 @@ ProjectsPage = Page[ProjectOut]
 
 
 class CreateProjectRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
+    name: ProjectName
+
+
+class ProjectUpdate(BaseModel):
+    name: ProjectName

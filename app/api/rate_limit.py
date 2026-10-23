@@ -9,6 +9,7 @@ from redis.exceptions import BusyLoadingError, ClusterDownError, MasterDownError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
+from app.api.deps import get_redis
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -49,23 +50,25 @@ return ip_count
 """
 
 
-async def get_redis(request: Request) -> Redis:
-    return request.app.state.redis
-
-
 def login_rate_limit_keys(ip: str, email: str) -> tuple[str, str]:
+    return rate_limit_keys("login", ip, email)
+
+
+def rate_limit_keys(scope: str, ip: str, email: str) -> tuple[str, str]:
     normalized_email = email.strip().lower()
     email_digest = hashlib.sha256(normalized_email.encode()).hexdigest()
-    return f"login:ip:{ip}", f"login:pair:{ip}:{email_digest}"
+    return f"{scope}:ip:{ip}", f"{scope}:pair:{ip}:{email_digest}"
 
 
-async def login_rate_limit(
+async def reserve_rate_limit_attempt(
     request: Request,
-    form: Annotated[OAuth2PasswordRequestForm, Depends()],
-    redis: Annotated[Redis, Depends(get_redis)],
+    email: str,
+    redis: Redis,
+    scope: str,
+    detail: str,
 ) -> None:
     ip = request.client.host if request.client else "unknown"
-    ip_key, pair_key = login_rate_limit_keys(ip, form.username)
+    ip_key, pair_key = rate_limit_keys(scope, ip, email)
     try:
         allowed, *values = await redis.eval(
             _RESERVE_ATTEMPT,
@@ -79,19 +82,33 @@ async def login_rate_limit(
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many login attempts",
+                detail=detail,
                 headers={"Retry-After": str(max(int(values[0]), 1))},
             )
     except HTTPException:
         raise
     except REDIS_UNAVAILABLE_ERRORS:
-        logger.warning("Login rate limiter unavailable; allowing request", exc_info=True)
+        logger.warning("Rate limiter unavailable; allowing request", exc_info=True)
 
 
-async def complete_login_success(redis: Redis, request: Request, email: str) -> None:
+async def clear_rate_limit_attempt(redis: Redis, request: Request, email: str, scope: str) -> None:
     ip = request.client.host if request.client else "unknown"
-    ip_key, pair_key = login_rate_limit_keys(ip, email)
+    ip_key, pair_key = rate_limit_keys(scope, ip, email)
     try:
         await redis.eval(_COMPLETE_SUCCESS, 2, pair_key, ip_key)
     except REDIS_UNAVAILABLE_ERRORS:
-        logger.warning("Could not clear successful login reservation", exc_info=True)
+        logger.warning("Could not clear successful rate limit reservation", exc_info=True)
+
+
+async def login_rate_limit(
+    request: Request,
+    form: Annotated[OAuth2PasswordRequestForm, Depends()],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> None:
+    await reserve_rate_limit_attempt(
+        request, form.username, redis, "login", "Too many login attempts"
+    )
+
+
+async def complete_login_success(redis: Redis, request: Request, email: str) -> None:
+    await clear_rate_limit_attempt(redis, request, email, "login")

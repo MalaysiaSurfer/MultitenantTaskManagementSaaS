@@ -22,10 +22,18 @@ async def test_member_list_role_change_remove_and_assignee_nulling(
 
     listed = await client.get("/organizations/members", headers=owner.headers)
     assert listed.status_code == 200
-    assert {row["email"]: row["role"] for row in listed.json()} == {
+    assert {row["email"]: row["role"] for row in listed.json()["items"]} == {
         "owner-members@example.com": "owner",
         "member-members@example.com": "member",
     }
+    first_page = await client.get("/organizations/members?limit=1", headers=owner.headers)
+    assert len(first_page.json()["items"]) == 1
+    next_page = await client.get(
+        f"/organizations/members?limit=1&cursor={first_page.json()['next_cursor']}",
+        headers=owner.headers,
+    )
+    assert len(next_page.json()["items"]) == 1
+    assert next_page.json()["next_cursor"] is None
 
     changed = await client.patch(
         f"/organizations/members/{member.user_id}",
@@ -34,13 +42,13 @@ async def test_member_list_role_change_remove_and_assignee_nulling(
     )
     assert changed.status_code == 200
     assert changed.json()["role"] == "admin"
-    assert (
-        await client.patch(
-            f"/organizations/members/{member.user_id}",
-            headers=owner.headers,
-            json={"role": "owner"},
-        )
-    ).status_code == 422
+    promoted = await client.patch(
+        f"/organizations/members/{member.user_id}",
+        headers=owner.headers,
+        json={"role": "owner"},
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == "owner"
 
     project = (await create_project(client, owner.token, owner.org_id, "Assignments")).json()
     async with session_factory() as db:
@@ -90,9 +98,33 @@ async def test_owner_cannot_leave_or_be_demoted_as_last_owner(client, user_facto
         json={"role": "member"},
     )
     assert demote.status_code == 409
-    assert (await client.get("/organizations/members", headers=owner.headers)).json()[0][
+    assert (await client.get("/organizations/members", headers=owner.headers)).json()["items"][0][
         "role"
     ] == "owner"
+
+
+@pytest.mark.asyncio
+async def test_organization_create_rename_and_delete(client, user_factory):
+    owner = await user_factory("organization-crud@example.com", "Home")
+    created = await client.post("/organizations", headers=owner.headers, json={"name": " Extra "})
+    assert created.status_code == 201
+    assert created.json()["name"] == "Extra"
+    assert created.json()["role"] == "owner"
+    organization_id = created.json()["id"]
+
+    listed = await client.get("/organizations", headers=auth_headers(owner.token))
+    assert {row["id"] for row in listed.json()} == {owner.org_id, organization_id}
+    context_headers = auth_headers(owner.token, organization_id)
+    renamed = await client.patch(
+        "/organizations", headers=context_headers, json={"name": "Renamed"}
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Renamed"
+    deleted = await client.delete("/organizations", headers=context_headers)
+    assert deleted.status_code == 204
+    assert (await client.get("/projects", headers=context_headers)).status_code == 404
+    listed = await client.get("/organizations", headers=auth_headers(owner.token))
+    assert {row["id"] for row in listed.json()} == {owner.org_id}
 
 
 @pytest.mark.asyncio

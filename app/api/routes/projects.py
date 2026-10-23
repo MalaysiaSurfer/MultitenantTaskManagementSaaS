@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import OrgAdmin, OrgMember, OrgOwner, Pagination, ResourceID
 from app.core.exceptions import ProjectAlreadyExists
 from app.db.session import get_db
-from app.schemas.project import CreateProjectRequest, ProjectOut, ProjectsPage
+from app.schemas.project import CreateProjectRequest, ProjectOut, ProjectsPage, ProjectUpdate
 from app.services.project import (
     create_organization_project,
     delete_organization_project,
@@ -35,11 +35,7 @@ async def create_project(
             status_code=status.HTTP_409_CONFLICT,
             detail="Project already exists",
         ) from None
-    return ProjectOut(
-        id=project.id,
-        organization_id=project.organization_id,
-        name=project.name,
-    )
+    return ProjectOut.model_validate(project)
 
 
 @router.get("")
@@ -73,18 +69,14 @@ async def get_project(
         project_id=project_id,
     )
 
-    return ProjectOut(
-        id=project.id,
-        organization_id=project.organization_id,
-        name=project.name,
-    )
+    return ProjectOut.model_validate(project)
 
 
 @router.patch("/{project_id}")
 async def update_project(
     project_id: ResourceID,
     membership: OrgAdmin,
-    data: CreateProjectRequest,
+    data: ProjectUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProjectOut:
     try:
@@ -100,11 +92,7 @@ async def update_project(
             detail="Project already exists",
         ) from None
 
-    return ProjectOut(
-        id=project.id,
-        organization_id=project.organization_id,
-        name=project.name,
-    )
+    return ProjectOut.model_validate(project)
 
 
 @router.delete(

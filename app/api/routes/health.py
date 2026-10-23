@@ -6,7 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.rate_limit import get_redis
+from app.api.deps import get_redis
 from app.db.session import get_db
 
 logger = logging.getLogger(__name__)

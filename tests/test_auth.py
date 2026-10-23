@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
-from app.api.rate_limit import login_rate_limit_keys
+from app.api.rate_limit import login_rate_limit_keys, rate_limit_keys
 from app.core.config import settings
 from app.core.security import create_token
 from app.db.base import Organization, User
@@ -47,6 +47,33 @@ async def test_register_rejects_short_password(client):
         json={"email": "a@example.com", "password": "short", "organization_name": "Org"},
     )
     assert response.status_code == 422
+    blank_name = await client.post(
+        "/auth/register",
+        json={
+            "email": "blank@example.com",
+            "password": "TestPassword123!",
+            "organization_name": "  ",
+        },
+    )
+    assert blank_name.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_register_is_rate_limited_before_hashing_duplicate_accounts(client):
+    await register_user(client, "limited-register@example.com")
+    responses = [
+        await register_user(client, "limited-register@example.com")
+        for _ in range(settings.login_rate_limit_attempts)
+    ]
+    assert all(response.status_code == 409 for response in responses)
+    blocked = await register_user(client, "limited-register@example.com")
+    assert blocked.status_code == 429
+
+
+def test_rate_limit_email_key_is_case_and_whitespace_normalized():
+    assert rate_limit_keys("login", "127.0.0.1", " A@Example.com ") == rate_limit_keys(
+        "login", "127.0.0.1", "a@example.com"
+    )
 
 
 @pytest.mark.asyncio
@@ -195,6 +222,38 @@ async def test_logout_revokes_only_the_provided_refresh_session(client, user_fac
     assert (await client.post("/auth/logout", json={"refresh_token": current})).status_code == 204
     assert (await client.post("/auth/refresh", json={"refresh_token": current})).status_code == 401
     assert (await client.post("/auth/refresh", json={"refresh_token": other})).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_logout_all_invalidates_refresh_sessions(client, user_factory):
+    actor = await user_factory("logout-all@example.com", "Logout all")
+    session = (await login(client, "logout-all@example.com")).json()
+    response = await client.post("/auth/logout-all", headers=actor.headers)
+    assert response.status_code == 204
+    assert (
+        await client.post("/auth/refresh", json={"refresh_token": session["refresh_token"]})
+    ).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_password_change_rehashes_password_and_revokes_refresh_sessions(client, user_factory):
+    actor = await user_factory("password-change@example.com", "Password change")
+    session = (await login(client, "password-change@example.com")).json()
+    changed = await client.post(
+        "/auth/password",
+        headers=actor.headers,
+        json={"current_password": "TestPassword123!", "new_password": "NewPassword123!"},
+    )
+    assert changed.status_code == 204
+    assert (
+        await client.post("/auth/refresh", json={"refresh_token": session["refresh_token"]})
+    ).status_code == 401
+    assert (
+        await login(client, "password-change@example.com", "TestPassword123!")
+    ).status_code == 401
+    assert (
+        await login(client, "password-change@example.com", "NewPassword123!")
+    ).status_code == 200
 
 
 @pytest.mark.asyncio

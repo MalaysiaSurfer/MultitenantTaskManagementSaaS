@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
@@ -7,19 +8,21 @@ from jwt.exceptions import InvalidTokenError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_active_user
+from app.api.deps import CurrentUser, get_active_user, get_redis
 from app.api.rate_limit import (
     REDIS_UNAVAILABLE_ERRORS,
+    clear_rate_limit_attempt,
     complete_login_success,
-    get_redis,
     login_rate_limit,
+    reserve_rate_limit_attempt,
 )
 from app.core.config import settings
 from app.core.exceptions import EmailAlreadyRegistered
-from app.core.security import create_token, decode_token_payload
+from app.core.security import create_token, decode_token_payload, password_hash
 from app.db.session import get_db
 from app.schemas.auth import (
     OrgBrief,
+    PasswordChangeRequest,
     RefreshRequest,
     RegisterRequest,
     RegisterResponse,
@@ -44,8 +47,14 @@ async def _get_session_version(redis: Redis, user_id: int) -> int:
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(
-    data: RegisterRequest, db: Annotated[AsyncSession, Depends(get_db)]
+    data: RegisterRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request,
+    redis: Annotated[Redis, Depends(get_redis)],
 ) -> RegisterResponse:
+    await reserve_rate_limit_attempt(
+        request, data.email, redis, "register", "Too many registration attempts"
+    )
     try:
         user, organization, membership = await register_user(db, data)
     except EmailAlreadyRegistered:
@@ -53,6 +62,8 @@ async def register(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email already registered",
         ) from None
+
+    await clear_rate_limit_attempt(redis, request, data.email, "register")
 
     return RegisterResponse(
         user=UserBrief(id=user.id, email=user.email),
@@ -239,6 +250,43 @@ async def logout(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication service unavailable",
         ) from None
+
+
+@router.post("/logout-all", status_code=status.HTTP_204_NO_CONTENT)
+async def logout_all(
+    user: CurrentUser,
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> None:
+    try:
+        await _revoke_all_user_sessions(redis, user.id)
+    except REDIS_UNAVAILABLE_ERRORS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
+        ) from None
+
+
+@router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    data: PasswordChangeRequest,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> None:
+    valid, _ = await asyncio.to_thread(
+        password_hash.verify_and_update, data.current_password, user.hashed_password
+    )
+    if not valid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
+    try:
+        await _revoke_all_user_sessions(redis, user.id)
+    except REDIS_UNAVAILABLE_ERRORS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
+        ) from None
+    user.hashed_password = await asyncio.to_thread(password_hash.hash, data.new_password)
+    await db.commit()
 
 
 @router.get("/me")

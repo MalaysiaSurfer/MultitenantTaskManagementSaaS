@@ -11,7 +11,7 @@ class InvitationRequest(BaseModel):
     @classmethod
     def convert_to_lower(cls, v: str) -> EmailStr:
         if isinstance(v, str):
-            return v.lower()
+            return v.strip().lower()
         return v
 
 

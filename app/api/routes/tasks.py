@@ -29,15 +29,7 @@ async def create_task(
         data=data,
     )
 
-    return TaskOut(
-        id=task.id,
-        organization_id=task.organization_id,
-        project_id=task.project_id,
-        title=task.title,
-        description=task.description,
-        status=task.status,
-        assignee_id=task.assignee_id,
-    )
+    return TaskOut.model_validate(task)
 
 
 @router.get("")
@@ -76,15 +68,7 @@ async def get_task(
         task_id=task_id,
     )
 
-    return TaskOut(
-        id=task.id,
-        organization_id=task.organization_id,
-        project_id=task.project_id,
-        title=task.title,
-        description=task.description,
-        status=task.status,
-        assignee_id=task.assignee_id,
-    )
+    return TaskOut.model_validate(task)
 
 
 @router.patch("/{task_id}")
@@ -101,15 +85,7 @@ async def update_task(
         task_id=task_id,
     )
 
-    return TaskOut(
-        id=task.id,
-        organization_id=task.organization_id,
-        project_id=task.project_id,
-        title=task.title,
-        description=task.description,
-        status=task.status,
-        assignee_id=task.assignee_id,
-    )
+    return TaskOut.model_validate(task)
 
 
 @router.delete(

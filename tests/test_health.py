@@ -1,5 +1,6 @@
 import pytest
 from app.api.rate_limit import get_redis
+from app.db.session import get_db
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 
@@ -18,6 +19,21 @@ async def test_readiness_returns_503_when_redis_is_unavailable(client, app):
 
     app.dependency_overrides[get_redis] = lambda: BrokenRedis()
     response = await client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "not ready"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_returns_503_when_database_is_unavailable(client, app):
+    class BrokenDatabase:
+        async def execute(self, statement):
+            raise OSError("Database unavailable")
+
+    app.dependency_overrides[get_db] = lambda: BrokenDatabase()
+    try:
+        response = await client.get("/ready")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
     assert response.status_code == 503
     assert response.json() == {"status": "not ready"}
 
@@ -53,3 +69,12 @@ async def test_request_id_header_is_sanitized(client):
     response = await client.get("/health", headers={"X-Request-ID": "evil/header"})
     assert response.status_code == 200
     assert response.headers["X-Request-ID"] != "evil/header"
+
+
+@pytest.mark.asyncio
+async def test_request_id_is_generated_when_header_is_missing(client):
+    from uuid import UUID
+
+    response = await client.get("/health")
+    assert response.status_code == 200
+    assert UUID(response.headers["X-Request-ID"])

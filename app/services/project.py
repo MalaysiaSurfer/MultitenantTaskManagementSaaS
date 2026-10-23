@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundException, ProjectAlreadyExists
 from app.db.base import Project
 from app.schemas.pagination import Page
-from app.schemas.project import CreateProjectRequest, OrganizationProject
+from app.schemas.project import CreateProjectRequest, OrganizationProject, ProjectUpdate
 
 
 async def create_organization_project(
@@ -86,7 +86,7 @@ async def get_organization_project(
 
 
 async def update_organization_project(
-    db: AsyncSession, organization_id: int, data: CreateProjectRequest, project_id: int
+    db: AsyncSession, organization_id: int, data: ProjectUpdate, project_id: int
 ) -> OrganizationProject:
     try:
         result = await db.execute(

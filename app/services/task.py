@@ -163,26 +163,30 @@ async def update_organization_task(
     assignee_id = update_data.get("assignee_id")
     if assignee_id is not None:
         await _ensure_org_member(db=db, organization_id=organization_id, user_id=assignee_id)
-    result = await db.execute(
-        update(Task)
-        .where(Task.id == task_id, Task.organization_id == organization_id)
-        .values(update_data)
-        .returning(
-            Task.id,
-            Task.organization_id,
-            Task.project_id,
-            Task.title,
-            Task.description,
-            Task.status,
-            Task.assignee_id,
+    try:
+        result = await db.execute(
+            update(Task)
+            .where(Task.id == task_id, Task.organization_id == organization_id)
+            .values(update_data)
+            .returning(
+                Task.id,
+                Task.organization_id,
+                Task.project_id,
+                Task.title,
+                Task.description,
+                Task.status,
+                Task.assignee_id,
+            )
         )
-    )
+        task = result.one_or_none()
+        if task is None:
+            raise NotFoundException()
 
-    task = result.one_or_none()
-    if task is None:
-        raise NotFoundException()
-
-    await db.commit()
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        logger.warning("IntegrityError while updating task", exc_info=exc)
+        raise NotFoundException() from None
 
     return OrganizationTask(
         id=task.id,

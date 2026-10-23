@@ -54,8 +54,15 @@ async def authenticate_user(
         await asyncio.to_thread(verify_password, password, DUMMY_HASH)
         return None
 
-    if not await asyncio.to_thread(verify_password, password, user.hashed_password):
+    valid, updated_hash = await asyncio.to_thread(
+        password_hash.verify_and_update, password, user.hashed_password
+    )
+    if not valid:
         return None
+
+    if updated_hash is not None:
+        user.hashed_password = updated_hash
+        await db.commit()
 
     if not user.is_active:
         return None

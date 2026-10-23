@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    MetaData,
     String,
     UniqueConstraint,
     func,
@@ -23,7 +24,14 @@ from sqlalchemy.orm import (
 
 
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(
+        naming_convention={
+            "ix": "ix_%(column_0_label)s",
+            "uq": "%(table_name)s_%(column_0_N_name)s_key",
+            "fk": "%(table_name)s_%(column_0_N_name)s_fkey",
+            "pk": "%(table_name)s_pkey",
+        }
+    )
 
 
 class MembershipRole(enum.StrEnum):
@@ -75,6 +83,7 @@ class Membership(Base):
     __tablename__ = "memberships"
     __table_args__ = (
         UniqueConstraint("user_id", "organization_id", name="uq_memberships_user_organization"),
+        Index("ix_memberships_organization_id", "organization_id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
@@ -122,14 +131,15 @@ class Task(Base):
             ["assignee_id", "organization_id"],
             ["memberships.user_id", "memberships.organization_id"],
             ondelete="SET NULL (assignee_id)",
+            name="fk_tasks_assignee_membership",
         ),
         Index("ix_tasks_organization_status", "organization_id", "status"),
         Index("ix_tasks_organization_assignee", "organization_id", "assignee_id"),
+        Index("ix_tasks_organization_project", "organization_id", "project_id"),
+        Index("ix_tasks_organization_id_id", "organization_id", "id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
-    organization_id: Mapped[int] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
-    )
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"))
     project_id: Mapped[int] = mapped_column()
     title: Mapped[str] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(String(1000))

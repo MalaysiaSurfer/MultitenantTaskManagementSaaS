@@ -186,3 +186,52 @@ async def test_owner_can_invite_and_grant_admin_role(client, user_factory, caplo
     organizations = await client.get("/organizations", headers=auth_headers(new_admin.token))
     membership = next(org for org in organizations.json() if org["id"] == owner.org_id)
     assert membership["role"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_invitation_cannot_be_accepted_after_inviter_is_demoted(
+    client, user_factory, caplog, session_factory
+):
+    from app.db.base import Membership, MembershipRole
+
+    owner = await user_factory("owner-retain@example.com", "Retained owner")
+    inviter = await user_factory("inviter-retain@example.com", "Inviter home")
+    another_owner = await user_factory("another-owner@example.com", "Owner home")
+    async with session_factory() as db:
+        db.add(
+            Membership(
+                user_id=inviter.user_id,
+                organization_id=owner.org_id,
+                role=MembershipRole.ADMIN,
+            )
+        )
+        db.add(
+            Membership(
+                user_id=another_owner.user_id,
+                organization_id=owner.org_id,
+                role=MembershipRole.OWNER,
+            )
+        )
+        await db.commit()
+    caplog.set_level(logging.INFO, logger="app.services.invitation")
+    sent = await client.post(
+        "/organizations/invite",
+        headers=auth_headers(inviter.token, owner.org_id),
+        json={"email": "invitee-retain@example.com", "role": "member"},
+    )
+    assert sent.status_code == 202
+    token = invitation_token(caplog, "invitee-retain@example.com")
+    async with session_factory() as db:
+        membership = await db.scalar(
+            select(Membership).where(
+                Membership.user_id == inviter.user_id,
+                Membership.organization_id == owner.org_id,
+            )
+        )
+        membership.role = MembershipRole.MEMBER
+        await db.commit()
+    invitee = await user_factory("invitee-retain@example.com", "Invitee home")
+    response = await client.post(
+        "/invitations/accept", headers=auth_headers(invitee.token), json={"token": token}
+    )
+    assert response.status_code == 404

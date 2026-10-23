@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from tests.helpers import create_project, create_task
 
@@ -25,6 +25,37 @@ async def test_project_create_update_and_duplicate_names(client, user_factory):
         "name"
     ] == "Plan 2"
     assert (await create_project(client, actor.token, actor.org_id, "Plan 2")).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_whitespace_names_are_rejected_or_normalized(client, user_factory):
+    actor = await user_factory("whitespace-project@example.com", "Whitespace")
+    assert (await create_project(client, actor.token, actor.org_id, "   ")).status_code == 422
+    plan = await create_project(client, actor.token, actor.org_id, " Plan ")
+    assert plan.status_code == 201
+    assert plan.json()["name"] == "Plan"
+    assert (await create_project(client, actor.token, actor.org_id, "Plan")).status_code == 409
+    task_title = await client.post(
+        "/tasks",
+        headers=actor.headers,
+        json={"project_id": plan.json()["id"], "title": " ", "description": "description"},
+    )
+    task_description = await client.post(
+        "/tasks",
+        headers=actor.headers,
+        json={"project_id": plan.json()["id"], "title": "title", "description": "  "},
+    )
+    extra_field = await client.post(
+        "/tasks",
+        headers=actor.headers,
+        json={
+            "project_id": plan.json()["id"],
+            "title": "title",
+            "description": "description",
+            "unexpected": True,
+        },
+    )
+    assert task_title.status_code == task_description.status_code == extra_field.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -126,6 +157,65 @@ async def test_keyset_pagination_includes_insert_added_between_pages_once(client
         cursor = page.json()["next_cursor"]
     assert seen == expected
     assert len(seen) == len(set(seen))
+
+
+@pytest.mark.asyncio
+async def test_task_filter_and_cursor_work_together(client, user_factory):
+    actor = await user_factory("cursor-filter@example.com", "Cursor filter")
+    project = (await create_project(client, actor.token, actor.org_id)).json()
+    todo_ids = []
+    for index in range(4):
+        response = await create_task(
+            client, actor.token, actor.org_id, project["id"], f"Todo {index}"
+        )
+        todo_ids.append(response.json()["id"])
+    done = (await create_task(client, actor.token, actor.org_id, project["id"], "Done")).json()
+    await client.patch(f"/tasks/{done['id']}", headers=actor.headers, json={"status": "done"})
+
+    first = await client.get("/tasks?status=todo&limit=2", headers=actor.headers)
+    first_ids = [item["id"] for item in first.json()["items"]]
+    assert first_ids == todo_ids[:2]
+    second = await client.get(
+        f"/tasks?status=todo&limit=2&cursor={first.json()['next_cursor']}",
+        headers=actor.headers,
+    )
+    assert [item["id"] for item in second.json()["items"]] == todo_ids[2:]
+
+
+@pytest.mark.asyncio
+async def test_task_assignment_race_returns_not_found_instead_of_500(
+    client, user_factory, session_factory, monkeypatch
+):
+    import app.services.task as task_service
+
+    from app.db.base import Membership
+
+    owner = await user_factory("task-race-owner@example.com", "Task race")
+    member = await user_factory("task-race-member@example.com", "Member home")
+    async with session_factory() as db:
+        db.add(Membership(user_id=member.user_id, organization_id=owner.org_id))
+        await db.commit()
+    project = (await create_project(client, owner.token, owner.org_id)).json()
+    task = (await create_task(client, owner.token, owner.org_id, project["id"], "Race task")).json()
+
+    async def remove_after_validation(db, organization_id, user_id):
+        async with session_factory() as other_session:
+            membership = await other_session.scalar(
+                select(Membership).where(
+                    Membership.organization_id == organization_id,
+                    Membership.user_id == user_id,
+                )
+            )
+            await other_session.delete(membership)
+            await other_session.commit()
+
+    monkeypatch.setattr(task_service, "_ensure_org_member", remove_after_validation)
+    response = await client.patch(
+        f"/tasks/{task['id']}",
+        headers=owner.headers,
+        json={"assignee_id": member.user_id},
+    )
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
