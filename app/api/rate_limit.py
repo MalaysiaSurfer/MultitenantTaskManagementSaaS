@@ -5,23 +5,12 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from redis.asyncio import Redis
-from redis.exceptions import BusyLoadingError, ClusterDownError, MasterDownError, ReadOnlyError
-from redis.exceptions import ConnectionError as RedisConnectionError
-from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.api.deps import get_redis
 from app.core.config import settings
+from app.core.redis_errors import REDIS_UNAVAILABLE_ERRORS
 
 logger = logging.getLogger(__name__)
-REDIS_UNAVAILABLE_ERRORS = (
-    RedisConnectionError,
-    RedisTimeoutError,
-    BusyLoadingError,
-    ClusterDownError,
-    MasterDownError,
-    ReadOnlyError,
-    OSError,
-)
 
 _RESERVE_ATTEMPT = """
 local pair_count = tonumber(redis.call('GET', KEYS[1]) or '0')

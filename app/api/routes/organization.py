@@ -1,7 +1,7 @@
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +20,12 @@ from app.core.config import settings
 from app.core.exceptions import InsufficientPermissions, LastOwnerError, NotFoundException
 from app.db.base import InvitationRole, Membership, MembershipRole, User
 from app.db.session import get_db
-from app.schemas.invitation import InvitationRequest, InvitationSent
+from app.schemas.invitation import (
+    InvitationRequest,
+    InvitationSent,
+    InvitationsPage,
+    PendingInvitationOut,
+)
 from app.schemas.organization import (
     MembershipRoleUpdate,
     MembersPage,
@@ -29,7 +34,11 @@ from app.schemas.organization import (
     OrganizationOut,
     OrganizationUpdate,
 )
-from app.services.invitation import send_user_invitation
+from app.services.invitation import (
+    deliver_invitation,
+    get_pending_invitations,
+    send_user_invitation,
+)
 from app.services.organization import (
     create_organization,
     delete_organization,
@@ -110,6 +119,7 @@ async def send_invitation(
     db: Annotated[AsyncSession, Depends(get_db)],
     request: Request,
     redis: Annotated[Redis, Depends(get_redis)],
+    background_tasks: BackgroundTasks,
 ) -> InvitationSent:
     if membership.role == MembershipRole.ADMIN and data.role != InvitationRole.MEMBER:
         raise HTTPException(
@@ -118,14 +128,34 @@ async def send_invitation(
     await reserve_rate_limit_attempt(
         request, data.email, redis, "invite", "Too many invitation attempts"
     )
-    await send_user_invitation(
+    delivery = await send_user_invitation(
         db=db,
         user_id=membership.user_id,
         organization_id=membership.organization_id,
         data=data,
         expires_delta=timedelta(days=settings.invitation_expire_days),
     )
+    if delivery is not None:
+        background_tasks.add_task(deliver_invitation, delivery)
     return InvitationSent()
+
+
+@router.get("/invitations")
+async def list_invitations(
+    membership: OrgAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    pagination: Pagination,
+) -> InvitationsPage:
+    page = await get_pending_invitations(
+        db,
+        membership.organization_id,
+        limit=pagination.limit,
+        cursor=pagination.cursor,
+    )
+    return InvitationsPage(
+        items=[PendingInvitationOut(**invitation._asdict()) for invitation in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.get("/members")

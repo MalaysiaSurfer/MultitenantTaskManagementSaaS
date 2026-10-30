@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     login_rate_limit_attempts: int = Field(default=5, ge=1)
     login_rate_limit_window_seconds: int = Field(default=300, ge=1)
     login_rate_limit_ip_multiplier: int = Field(default=5, ge=1)
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_starttls: bool = True
+    smtp_timeout_seconds: float = Field(default=10, gt=0)
+    mail_from: str = "noreply@localhost"
+    invitation_accept_url: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -27,6 +35,20 @@ class Settings(BaseSettings):
         value = value.strip()
         if not value:
             raise ValueError("SECRET_KEY must not be empty")
+        return value
+
+    @field_validator("smtp_host", "smtp_username", "smtp_password", "invitation_accept_url")
+    @classmethod
+    def blank_to_none(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip()
+
+    @field_validator("invitation_accept_url")
+    @classmethod
+    def validate_invitation_accept_url(cls, value: str | None) -> str | None:
+        if value is not None and "{token}" not in value:
+            raise ValueError("INVITATION_ACCEPT_URL must contain the {token} placeholder")
         return value
 
     @model_validator(mode="after")

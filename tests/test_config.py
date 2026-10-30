@@ -77,3 +77,20 @@ def test_settings_reject_unknown_environment():
 def test_rate_limit_settings_must_be_positive(field, value):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, secret_key=GOOD_KEY, database_url=DATABASE_URL, **{field: value})
+
+
+def test_invitation_accept_url_requires_token_placeholder():
+    with pytest.raises(ValidationError, match="INVITATION_ACCEPT_URL"):
+        Settings(
+            _env_file=None,
+            secret_key=GOOD_KEY,
+            database_url=DATABASE_URL,
+            invitation_accept_url="https://app.example.com/invite",
+        )
+
+
+def test_blank_smtp_host_disables_mail_delivery():
+    config = Settings(
+        _env_file=None, secret_key=GOOD_KEY, database_url=DATABASE_URL, smtp_host="  "
+    )
+    assert config.smtp_host is None

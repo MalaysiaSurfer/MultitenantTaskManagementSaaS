@@ -12,6 +12,10 @@ password_hash = PasswordHash.recommended()
 DUMMY_HASH = password_hash.hash("dummypassword")
 
 
+def session_version_key(user_id: int) -> str:
+    return f"jwt:session-version:{user_id}"
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return password_hash.verify(plain_password, hashed_password)
 
@@ -40,13 +44,6 @@ def create_token(
         settings.secret_key,
         algorithm=ALGORITHM,
     )
-
-
-def decode_token(token: str, expected_type: str) -> int:
-    try:
-        return int(decode_token_payload(token, expected_type)["sub"])
-    except ValueError:
-        raise InvalidTokenError("bad subject") from None
 
 
 def decode_token_payload(token: str, expected_type: str) -> dict:

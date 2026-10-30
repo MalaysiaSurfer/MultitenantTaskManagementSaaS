@@ -18,7 +18,12 @@ from app.api.rate_limit import (
 )
 from app.core.config import settings
 from app.core.exceptions import EmailAlreadyRegistered
-from app.core.security import create_token, decode_token_payload, password_hash
+from app.core.security import (
+    create_token,
+    decode_token_payload,
+    password_hash,
+    session_version_key,
+)
 from app.db.session import get_db
 from app.schemas.auth import (
     OrgBrief,
@@ -35,13 +40,13 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 async def _revoke_all_user_sessions(redis: Redis, user_id: int) -> None:
-    key = f"jwt:session-version:{user_id}"
+    key = session_version_key(user_id)
     await redis.incr(key)
     await redis.expire(key, settings.refresh_token_expire_days * 24 * 60 * 60)
 
 
 async def _get_session_version(redis: Redis, user_id: int) -> int:
-    version = await redis.get(f"jwt:session-version:{user_id}")
+    version = await redis.get(session_version_key(user_id))
     return int(version or 0)
 
 

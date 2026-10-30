@@ -1,7 +1,7 @@
 import re
 
 import pytest
-from fastapi.routing import APIRoute
+from fastapi.routing import APIRoute, iter_route_contexts
 
 
 def _dependencies(dependant):
@@ -15,8 +15,8 @@ def _organization_routes():
     from app.main import app
 
     routes = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
+    for route in iter_route_contexts(app.routes):
+        if not isinstance(route.original_route, APIRoute):
             continue
         dependencies = list(_dependencies(route.dependant))
         has_organization_header = any(
@@ -36,6 +36,8 @@ def _organization_routes():
             body = {"project_id": 1, "title": "foreign task", "description": "test"}
         elif route.path == "/tasks/{task_id}" and "PATCH" in route.methods:
             body = {"title": "foreign task"}
+        elif route.path == "/organizations" and "PATCH" in route.methods:
+            body = {"name": "foreign organization"}
         elif route.path == "/organizations/invite":
             body = {"email": "foreign@example.com", "role": "member"}
         elif "/members/" in route.path and "PATCH" in route.methods:
@@ -45,6 +47,11 @@ def _organization_routes():
         for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
             routes.append((method, path, body))
     return routes
+
+
+def test_route_guard_discovers_organization_routes():
+    paths = {path for _, path, _ in _organization_routes()}
+    assert {"/organizations/members", "/projects", "/tasks/1"} <= paths
 
 
 @pytest.mark.parametrize("method,path,body", _organization_routes())

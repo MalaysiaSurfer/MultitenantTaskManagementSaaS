@@ -236,6 +236,50 @@ async def test_logout_all_invalidates_refresh_sessions(client, user_factory):
 
 
 @pytest.mark.asyncio
+async def test_logout_all_revokes_issued_access_tokens(client, user_factory):
+    actor = await user_factory("logout-all-access@example.com", "Logout all access")
+    other_session = (await login(client, "logout-all-access@example.com")).json()
+    other_headers = auth_headers(other_session["access_token"], actor.org_id)
+    assert (await client.get("/projects", headers=other_headers)).status_code == 200
+
+    assert (await client.post("/auth/logout-all", headers=actor.headers)).status_code == 204
+
+    assert (await client.get("/projects", headers=other_headers)).status_code == 401
+    assert (await client.get("/auth/me", headers=actor.headers)).status_code == 401
+    fresh = (await login(client, "logout-all-access@example.com")).json()["access_token"]
+    assert (await client.get("/auth/me", headers=auth_headers(fresh))).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_password_change_revokes_issued_access_tokens(client, user_factory):
+    actor = await user_factory("password-access@example.com", "Password access")
+    stolen = (await login(client, "password-access@example.com")).json()["access_token"]
+    changed = await client.post(
+        "/auth/password",
+        headers=actor.headers,
+        json={"current_password": "TestPassword123!", "new_password": "NewPassword123!"},
+    )
+    assert changed.status_code == 204
+    assert (await client.get("/auth/me", headers=auth_headers(stolen))).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_access_token_check_fails_closed_when_redis_is_unavailable(client, app, user_factory):
+    from app.api.deps import get_redis
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    actor = await user_factory("access-outage@example.com", "Access outage")
+
+    class BrokenRedis:
+        async def get(self, key):
+            raise RedisConnectionError("Redis unavailable")
+
+    app.dependency_overrides[get_redis] = lambda: BrokenRedis()
+    response = await client.get("/auth/me", headers=actor.headers)
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
 async def test_password_change_rehashes_password_and_revokes_refresh_sessions(client, user_factory):
     actor = await user_factory("password-change@example.com", "Password change")
     session = (await login(client, "password-change@example.com")).json()

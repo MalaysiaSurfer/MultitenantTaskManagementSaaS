@@ -1,7 +1,8 @@
 import hashlib
 import logging
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from sqlalchemy import Interval, bindparam, func, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -10,10 +11,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AlreadyMember, NotFoundException
-from app.db.base import Invitation, InvitationRole, Membership, MembershipRole, User
+from app.db.base import Invitation, InvitationRole, Membership, MembershipRole, Organization, User
 from app.schemas.invitation import InvitationAccepted, InvitationRequest
+from app.schemas.pagination import Page
+from app.services.mailer import MAIL_DELIVERY_ERRORS, mail_delivery_enabled, send_email
 
 logger = logging.getLogger(__name__)
+
+
+class InvitationDelivery(NamedTuple):
+    email: str
+    organization_id: int
+    organization_name: str
+    token: str
+
+
+class PendingInvitation(NamedTuple):
+    id: int
+    email: str
+    role: InvitationRole
+    invited_by_id: int
+    expires_at: datetime
+    created_at: datetime
 
 
 async def send_user_invitation(
@@ -22,14 +41,14 @@ async def send_user_invitation(
     organization_id: int,
     data: InvitationRequest,
     expires_delta: timedelta,
-) -> None:
+) -> InvitationDelivery | None:
     already_member = await db.scalar(
         select(Membership.id)
         .join(User, User.id == Membership.user_id)
         .where(User.email == data.email, Membership.organization_id == organization_id)
     )
     if already_member is not None:
-        return
+        return None
 
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -54,14 +73,89 @@ async def send_user_invitation(
         },
     )
     await db.execute(stmt)
+    organization_name = await db.scalar(
+        select(Organization.name).where(Organization.id == organization_id)
+    )
     await db.commit()
+    logger.info("Invitation created for organization %s", organization_id)
+    return InvitationDelivery(data.email, organization_id, organization_name, token)
 
-    if settings.environment != "prod":
-        logger.info(
-            "Invitation for %s to organization %s, token=%s", data.email, organization_id, token
-        )
+
+def _invitation_email_body(delivery: InvitationDelivery) -> str:
+    if settings.invitation_accept_url is not None:
+        action = "Accept it here: " + settings.invitation_accept_url.format(token=delivery.token)
     else:
-        logger.info("Invitation created for organization %s", organization_id)
+        action = (
+            "Sign in or register with this email and accept the invitation with token:\n"
+            + delivery.token
+        )
+    return (
+        f"You have been invited to join {delivery.organization_name}.\n\n"
+        f"{action}\n\n"
+        f"The invitation expires in {settings.invitation_expire_days} days."
+    )
+
+
+async def deliver_invitation(delivery: InvitationDelivery) -> None:
+    if not mail_delivery_enabled():
+        if settings.environment != "prod":
+            logger.info(
+                "Invitation for %s to organization %s, token=%s",
+                delivery.email,
+                delivery.organization_id,
+                delivery.token,
+            )
+        else:
+            logger.warning(
+                "SMTP is not configured; invitation for organization %s was not delivered",
+                delivery.organization_id,
+            )
+        return
+    try:
+        await send_email(
+            delivery.email,
+            f"Invitation to {delivery.organization_name}",
+            _invitation_email_body(delivery),
+        )
+    except MAIL_DELIVERY_ERRORS:
+        logger.error(
+            "Could not deliver invitation for organization %s",
+            delivery.organization_id,
+            exc_info=True,
+        )
+        return
+    logger.info("Invitation delivered for organization %s", delivery.organization_id)
+
+
+async def get_pending_invitations(
+    db: AsyncSession,
+    organization_id: int,
+    limit: int = 20,
+    cursor: int | None = None,
+) -> Page[PendingInvitation]:
+    stmt = (
+        select(
+            Invitation.id,
+            Invitation.email,
+            Invitation.role,
+            Invitation.invited_by_id,
+            Invitation.expires_at,
+            Invitation.created_at,
+        )
+        .where(
+            Invitation.organization_id == organization_id,
+            Invitation.accepted_at.is_(None),
+            Invitation.expires_at > func.now(),
+        )
+        .order_by(Invitation.id)
+        .limit(limit + 1)
+    )
+    if cursor is not None:
+        stmt = stmt.where(Invitation.id > cursor)
+    rows = (await db.execute(stmt)).all()
+    has_more = len(rows) > limit
+    items = [PendingInvitation(*row) for row in rows[:limit]]
+    return Page(items=items, next_cursor=items[-1].id if has_more else None)
 
 
 async def accept_user_invitation(

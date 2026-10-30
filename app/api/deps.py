@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import INT4_MAX
 from app.core.exceptions import NotFoundException
 from app.core.log_context import organization_id_var, user_id_var
-from app.core.security import decode_token
+from app.core.redis_errors import REDIS_UNAVAILABLE_ERRORS
+from app.core.security import decode_token_payload, session_version_key
 from app.db.base import Membership, MembershipRole, TaskStatus, User
 from app.db.session import get_db
 from app.schemas.pagination import PaginationParams
@@ -62,16 +63,30 @@ async def get_active_user(db: AsyncSession, user_id: int) -> User:
 async def get_current_user(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
     token: Annotated[str, Depends(oauth2_scheme)],
 ) -> User:
+    invalid_token = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="invalid access token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
-        user_id = decode_token(token, "access")
-    except InvalidTokenError:
+        payload = decode_token_payload(token, "access")
+        user_id = int(payload["sub"])
+        token_session_version = int(payload.get("sv", 0))
+    except (InvalidTokenError, ValueError, TypeError):
+        raise invalid_token from None
+
+    try:
+        session_version = int(await redis.get(session_version_key(user_id)) or 0)
+    except REDIS_UNAVAILABLE_ERRORS:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid access token",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
         ) from None
+    if token_session_version < session_version:
+        raise invalid_token
 
     user = await get_active_user(db, user_id)
     user_id_var.set(str(user.id))

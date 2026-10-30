@@ -1,6 +1,9 @@
+from datetime import datetime
+
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.db.base import InvitationRole, MembershipRole
+from app.schemas.pagination import Page
 
 
 class InvitationRequest(BaseModel):
@@ -26,3 +29,15 @@ class AcceptInvitationRequest(BaseModel):
 class InvitationAccepted(BaseModel):
     organization_id: int
     role: MembershipRole
+
+
+class PendingInvitationOut(BaseModel):
+    id: int
+    email: str
+    role: InvitationRole
+    invited_by_id: int
+    expires_at: datetime
+    created_at: datetime
+
+
+InvitationsPage = Page[PendingInvitationOut]
